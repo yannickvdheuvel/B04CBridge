@@ -38,7 +38,6 @@ class MapsNotificationListener: NotificationListenerService(){
             Notification.EXTRA_SUMMARY_TEXT
         ).forEach { key -> addLine(lines,e.getCharSequence(key)) }
 
-        // Google Maps stores the useful turn-by-turn text mostly in custom RemoteViews.
         runCatching {
             val mapsCtx=createPackageContext(sbn.packageName,Context.CONTEXT_IGNORE_SECURITY)
             val builder=Notification.Builder.recoverBuilder(this,sbn.notification)
@@ -57,13 +56,15 @@ class MapsNotificationListener: NotificationListenerService(){
         val text=lines.joinToString(" | ")
         BridgeState.log("MAPS: $text")
 
-        val man=parseManeuver(text) ?: Protocol.STRAIGHT
-        // Maps sometimes omits the distance while the maneuver is effectively 'now'.
-        val dist=parseDistance(text) ?: 0
+        val distances = findDistances(lines.toList())
+        val currentDistance = distances.firstOrNull() ?: 0
+        val totalDistance = chooseRemainingDistance(lines.toList(), distances) ?: maxOf(currentDistance, 1)
+        val maneuver=parseManeuver(text) ?: Protocol.STRAIGHT
+
         val ble=BridgeState.ble
         if(ble?.ready==true){
-            BridgeState.log("Maps -> display: ${maneuverName(man)}, ${dist}m")
-            ble.testNav(man,dist)
+            BridgeState.log("Maps -> display: ${maneuverName(maneuver)}, nu ${currentDistance}m, resterend ${totalDistance}m")
+            ble.sendMapsNav(maneuver,currentDistance,totalDistance)
         } else {
             BridgeState.log("Maps ontvangen, maar B04C is niet klaar")
         }
@@ -87,20 +88,37 @@ class MapsNotificationListener: NotificationListenerService(){
             "flauw rechts" in t || "lichte bocht rechts" in t || "slight right" in t || "houd rechts" in t -> Protocol.SLIGHT_RIGHT
             "scherp links" in t || "sharp left" in t -> Protocol.SHARP_LEFT
             "scherp rechts" in t || "sharp right" in t -> Protocol.SHARP_RIGHT
-            "linksaf" in t || "sla links" in t || "turn left" in t || " left onto " in t -> Protocol.LEFT
-            "rechtsaf" in t || "sla rechts" in t || "turn right" in t || " right onto " in t -> Protocol.RIGHT
+            "linksaf" in t || "sla links" in t || "turn left" in t || " left onto " in t || "links" in t -> Protocol.LEFT
+            "rechtsaf" in t || "sla rechts" in t || "turn right" in t || " right onto " in t || "rechts" in t -> Protocol.RIGHT
             "bestemming" in t || "aankomst" in t || "arrive" in t || "destination" in t -> Protocol.ARRIVE
-            "rechtdoor" in t || "ga verder" in t || "continue" in t || "straight" in t -> Protocol.STRAIGHT
+            "rechtdoor" in t || "ga verder" in t || "continue" in t || "straight" in t || "volg" in t -> Protocol.STRAIGHT
             else -> null
         }
     }
 
-    private fun parseDistance(s:String):Int?{
-        Regex("(\\d+(?:[.,]\\d+)?)\\s*(km|m)\\b",RegexOption.IGNORE_CASE).find(s)?.let{m->
-            val v=m.groupValues[1].replace(',','.').toDoubleOrNull()?:return null
-            return if(m.groupValues[2].equals("km",true)) (v*1000).toInt() else v.toInt()
+    private fun findDistances(lines:List<String>):List<Int>{
+        val out=mutableListOf<Int>()
+        val re=Regex("(\\d+(?:[.,]\\d+)?)\\s*(km|m)\\b",RegexOption.IGNORE_CASE)
+        lines.forEach { line ->
+            re.findAll(line).forEach { m ->
+                val v=m.groupValues[1].replace(',','.').toDoubleOrNull() ?: return@forEach
+                val meters=if(m.groupValues[2].equals("km",true)) (v*1000.0).toInt() else v.toInt()
+                if(meters>=0) out.add(meters)
+            }
         }
-        return null
+        return out
+    }
+
+    private fun chooseRemainingDistance(lines:List<String>, distances:List<Int>):Int?{
+        val tripLine=lines.firstOrNull { line ->
+            val t=line.lowercase()
+            ("min" in t || "uur" in t || "hr" in t || Regex("\\b\\d{1,2}[:.]\\d{2}\\b").containsMatchIn(t)) &&
+                Regex("\\d+(?:[.,]\\d+)?\\s*(km|m)\\b",RegexOption.IGNORE_CASE).containsMatchIn(line)
+        }
+        if(tripLine!=null){
+            return findDistances(listOf(tripLine)).maxOrNull()
+        }
+        return distances.maxOrNull()
     }
 
     private fun maneuverName(m:Int)=when(m){

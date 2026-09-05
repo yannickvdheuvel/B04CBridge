@@ -85,7 +85,6 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
             val sub=v.getOrNull(5)?.toInt()?.and(255) ?: -1
             val param=v.getOrNull(6)?.toInt()?.and(255) ?: -1
 
-            // Display -> phone frames use direction 0x10 and target 0x11.
             if(direction==0x10 && target==0x11 && sub==0x04 && param==0 && len>=4 && !awaitingAuthReply){
                 val p=v.copyOfRange(7, minOf(11,v.size))
                 if(p.size==4){ challenge=p; awaitingAuthReply=true; log("Challenge ontvangen; authenticeren..."); authenticate(p) }
@@ -129,6 +128,15 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
         } else log("TX "+bytes.joinToString(" "){"%02X".format(it)})
     }
 
-    fun testNav(man:Int,dist:Int=250){ if(!ready){ log("Nog niet geauthenticeerd — test niet verstuurd"); return }; write(Protocol.nav(dist,man,2500)) }
+    fun testNav(man:Int,dist:Int=250){
+        if(!ready){ log("Nog niet geauthenticeerd — test niet verstuurd"); return }
+        write(Protocol.nav(dist,man,2500))
+    }
+
+    fun sendMapsNav(man:Int, dist:Int, total:Int){
+        if(!ready){ log("Maps ontvangen, maar B04C is niet klaar"); return }
+        write(Protocol.navDetailed(dist, man, 0, Protocol.STRAIGHT, 0, Protocol.STRAIGHT, total))
+    }
+
     fun stopNav(){ write(Protocol.stopNav()) }
 }

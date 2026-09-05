@@ -1,0 +1,17 @@
+<ScrollView xmlns:android="http://schemas.android.com/apk/res/android"
+    android:layout_width="match_parent" android:layout_height="match_parent">
+    <LinearLayout android:orientation="vertical" android:padding="20dp"
+        android:layout_width="match_parent" android:layout_height="wrap_content">
+        <TextView android:id="@+id/status" android:text="Niet verbonden" android:textSize="18sp"
+            android:layout_width="match_parent" android:layout_height="wrap_content" android:paddingBottom="16dp"/>
+        <Button android:id="@+id/connect" android:text="Zoek B04C en verbind" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+        <Button android:id="@+id/notif" android:text="Geef toegang tot Google Maps meldingen" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+        <TextView android:text="Handmatige displaytest" android:textStyle="bold" android:paddingTop="20dp" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+        <Button android:id="@+id/left" android:text="Test: links over 250 m" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+        <Button android:id="@+id/right" android:text="Test: rechts over 250 m" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+        <Button android:id="@+id/straight" android:text="Test: rechtdoor over 250 m" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+        <Button android:id="@+id/stop" android:text="Navigatie stoppen" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+        <TextView android:id="@+id/log" android:textIsSelectable="true" android:typeface="monospace" android:textSize="12sp"
+            android:paddingTop="20dp" android:layout_width="match_parent" android:layout_height="wrap_content"/>
+    </LinearLayout>
+</ScrollView>

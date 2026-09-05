@@ -10,6 +10,8 @@ import android.view.ViewGroup
 import android.widget.TextView
 
 class MapsNotificationListener: NotificationListenerService(){
+    private var lastSignature = ""
+    private var lastKnownTotalDistance: Int? = null
 
     override fun onListenerConnected() {
         super.onListenerConnected()
@@ -29,6 +31,8 @@ class MapsNotificationListener: NotificationListenerService(){
     private fun handle(sbn: StatusBarNotification){
         val lines = LinkedHashSet<String>()
         val e=sbn.notification.extras
+
+        // Standard notification fields.
         listOf(
             Notification.EXTRA_TITLE,
             Notification.EXTRA_TEXT,
@@ -38,6 +42,15 @@ class MapsNotificationListener: NotificationListenerService(){
             Notification.EXTRA_SUMMARY_TEXT
         ).forEach { key -> addLine(lines,e.getCharSequence(key)) }
 
+        // Also inspect every text-like extra: Maps changes which keys it uses between versions.
+        for(key in e.keySet()){
+            when(val value=e.get(key)){
+                is CharSequence -> addLine(lines,value)
+                is Array<*> -> value.filterIsInstance<CharSequence>().forEach { addLine(lines,it) }
+            }
+        }
+
+        // Recover the custom Google Maps RemoteViews and collect visible/accessibility text.
         runCatching {
             val mapsCtx=createPackageContext(sbn.packageName,Context.CONTEXT_IGNORE_SECURITY)
             val builder=Notification.Builder.recoverBuilder(this,sbn.notification)
@@ -53,13 +66,18 @@ class MapsNotificationListener: NotificationListenerService(){
         }.onFailure { BridgeState.log("Maps RemoteViews lezen mislukt: ${it.javaClass.simpleName}") }
 
         if(lines.isEmpty()) return
-        val text=lines.joinToString(" | ")
-        BridgeState.log("MAPS: $text")
+        val cleanLines=lines.filter { it.isNotBlank() }
+        val signature=cleanLines.joinToString(" | ")
+        if(signature!=lastSignature){
+            lastSignature=signature
+            BridgeState.log("MAPS: $signature")
+        }
 
-        val distances = findDistances(lines.toList())
-        val currentDistance = distances.firstOrNull() ?: 0
-        val totalDistance = chooseRemainingDistance(lines.toList(), distances) ?: maxOf(currentDistance, 1)
-        val maneuver=parseManeuver(text) ?: Protocol.STRAIGHT
+        val distances = findDistances(cleanLines)
+        val currentDistance = chooseCurrentDistance(cleanLines,distances) ?: 0
+        chooseRemainingDistance(cleanLines,distances)?.let { lastKnownTotalDistance=it }
+        val totalDistance = lastKnownTotalDistance ?: 0
+        val maneuver=parseManeuver(cleanLines) ?: Protocol.STRAIGHT
 
         val ble=BridgeState.ble
         if(ble?.ready==true){
@@ -72,6 +90,7 @@ class MapsNotificationListener: NotificationListenerService(){
 
     private fun collectText(v:View,lines:MutableSet<String>){
         if(v is TextView) addLine(lines,v.text)
+        addLine(lines,v.contentDescription)
         if(v is ViewGroup) for(i in 0 until v.childCount) collectText(v.getChildAt(i),lines)
     }
 
@@ -80,20 +99,35 @@ class MapsNotificationListener: NotificationListenerService(){
         if(s.isNotEmpty() && !s.equals("Google Maps",true) && !s.equals("Maps",true)) lines.add(s)
     }
 
-    private fun parseManeuver(s:String):Int?{
-        val t=s.lowercase()
-        return when {
-            "u-turn" in t || "u turn" in t || "keer om" in t || "omkeren" in t -> Protocol.UTURN
-            "flauw links" in t || "lichte bocht links" in t || "slight left" in t || "houd links" in t -> Protocol.SLIGHT_LEFT
-            "flauw rechts" in t || "lichte bocht rechts" in t || "slight right" in t || "houd rechts" in t -> Protocol.SLIGHT_RIGHT
-            "scherp links" in t || "sharp left" in t -> Protocol.SHARP_LEFT
-            "scherp rechts" in t || "sharp right" in t -> Protocol.SHARP_RIGHT
-            "linksaf" in t || "sla links" in t || "turn left" in t || " left onto " in t || "links" in t -> Protocol.LEFT
-            "rechtsaf" in t || "sla rechts" in t || "turn right" in t || " right onto " in t || "rechts" in t -> Protocol.RIGHT
-            "bestemming" in t || "aankomst" in t || "arrive" in t || "destination" in t -> Protocol.ARRIVE
-            "rechtdoor" in t || "ga verder" in t || "continue" in t || "straight" in t || "volg" in t -> Protocol.STRAIGHT
-            else -> null
+    private fun parseManeuver(lines:List<String>):Int?{
+        // Check actual instruction lines only. ETA text like "Aankomst om 21:06" is metadata,
+        // not an arrival maneuver.
+        for(line in lines){
+            val t=line.lowercase().trim()
+            if(isMetadataLine(t)) continue
+            when {
+                "u-turn" in t || "u turn" in t || "keer om" in t || "omkeren" in t -> return Protocol.UTURN
+                "flauw links" in t || "lichte bocht links" in t || "slight left" in t || "houd links" in t -> return Protocol.SLIGHT_LEFT
+                "flauw rechts" in t || "lichte bocht rechts" in t || "slight right" in t || "houd rechts" in t -> return Protocol.SLIGHT_RIGHT
+                "scherp links" in t || "sharp left" in t -> return Protocol.SHARP_LEFT
+                "scherp rechts" in t || "sharp right" in t -> return Protocol.SHARP_RIGHT
+                "linksaf" in t || "sla links" in t || "turn left" in t || " left onto " in t -> return Protocol.LEFT
+                "rechtsaf" in t || "sla rechts" in t || "turn right" in t || " right onto " in t -> return Protocol.RIGHT
+                "bestemming bereikt" in t || "je bent aangekomen" in t || "aangekomen bij" in t ||
+                    "destination reached" in t || "you have arrived" in t || "arrived at" in t -> return Protocol.ARRIVE
+                "rechtdoor" in t || "ga verder" in t || "continue" in t || "straight" in t ||
+                    "volg" in t || "fiets naar" in t || "rij naar" in t || "head " in t -> return Protocol.STRAIGHT
+            }
         }
+        return null
+    }
+
+    private fun isMetadataLine(t:String):Boolean{
+        if(t.isBlank() || t=="•" || t=="·") return true
+        if("navigatie afsluiten" in t || "stop navigation" in t) return true
+        if("aankomst om" in t || "arrival at" in t || "arrive at" in t) return true
+        if(Regex("^\\d{1,2}[:.]\\d{2}$").matches(t)) return true
+        return false
     }
 
     private fun findDistances(lines:List<String>):List<Int>{
@@ -109,6 +143,17 @@ class MapsNotificationListener: NotificationListenerService(){
         return out
     }
 
+    private fun chooseCurrentDistance(lines:List<String>, distances:List<Int>):Int?{
+        // Prefer a standalone distance / distance paired with the maneuver instruction.
+        val re=Regex("^\\s*(\\d+(?:[.,]\\d+)?)\\s*(km|m)\\s*$",RegexOption.IGNORE_CASE)
+        lines.forEach { line ->
+            val m=re.find(line) ?: return@forEach
+            val v=m.groupValues[1].replace(',','.').toDoubleOrNull() ?: return@forEach
+            return if(m.groupValues[2].equals("km",true)) (v*1000).toInt() else v.toInt()
+        }
+        return distances.minOrNull()
+    }
+
     private fun chooseRemainingDistance(lines:List<String>, distances:List<Int>):Int?{
         val tripLine=lines.firstOrNull { line ->
             val t=line.lowercase()
@@ -118,7 +163,7 @@ class MapsNotificationListener: NotificationListenerService(){
         if(tripLine!=null){
             return findDistances(listOf(tripLine)).maxOrNull()
         }
-        return distances.maxOrNull()
+        return if(distances.size>=2) distances.maxOrNull() else null
     }
 
     private fun maneuverName(m:Int)=when(m){

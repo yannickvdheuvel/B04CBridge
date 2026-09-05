@@ -16,13 +16,13 @@ class MainActivity:AppCompatActivity(){
     private val req=registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()){ ble.scanAndConnect() }
     override fun onCreate(b:Bundle?){super.onCreate(b);setContentView(R.layout.activity_main)
         logView=findViewById(R.id.log);status=findViewById(R.id.status)
-        ble=BleManager(this){ s ->
+        BridgeState.uiLog = { s ->
             runOnUiThread {
                 logView.append(s+"\n")
                 status.text=s
-                BridgeState.ble=ble
             }
         }
+        ble=BleManager(this){ s -> BridgeState.log(s) }
         findViewById<Button>(R.id.connect).setOnClickListener{
             if(Build.VERSION.SDK_INT>=31) req.launch(arrayOf(Manifest.permission.BLUETOOTH_SCAN,Manifest.permission.BLUETOOTH_CONNECT)) else ble.scanAndConnect()
         }
@@ -33,5 +33,15 @@ class MainActivity:AppCompatActivity(){
         findViewById<Button>(R.id.stop).setOnClickListener{ble.stopNav()}
         BridgeState.ble=ble
     }
+
+    override fun onDestroy() {
+        BridgeState.uiLog = null
+        super.onDestroy()
+    }
 }
-object BridgeState { @Volatile var ble:BleManager?=null }
+
+object BridgeState {
+    @Volatile var ble:BleManager?=null
+    var uiLog: ((String)->Unit)? = null
+    fun log(s:String){ uiLog?.invoke(s) }
+}

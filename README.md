@@ -25,3 +25,5 @@ Open de map in Android Studio (JDK 17), laat Gradle synchroniseren en kies Build
 6. Als er een navigatiepijl op het B04C-display verschijnt, geef de app toegang tot meldingen en start Google Maps navigatie.
 
 De Google Maps-parser is bewust simpel in v0.1: hij leest de zichtbare navigatiemelding. De volgende versie kan daarna robuuster worden gemaakt voor Nederlandse instructies, rotondes en de volgende twee manoeuvres.
+
+Build trigger: 2026-09-05

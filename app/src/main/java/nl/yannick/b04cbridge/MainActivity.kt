@@ -16,7 +16,13 @@ class MainActivity:AppCompatActivity(){
     private val req=registerForActivityResult(ActivityResultContracts.RequestMultiplePermissions()){ ble.scanAndConnect() }
     override fun onCreate(b:Bundle?){super.onCreate(b);setContentView(R.layout.activity_main)
         logView=findViewById(R.id.log);status=findViewById(R.id.status)
-        ble=BleManager(this){runOnUiThread{ s-> logView.append(s+"\n"); status.text=s; BridgeState.ble=ble }}
+        ble=BleManager(this){ s ->
+            runOnUiThread {
+                logView.append(s+"\n")
+                status.text=s
+                BridgeState.ble=ble
+            }
+        }
         findViewById<Button>(R.id.connect).setOnClickListener{
             if(Build.VERSION.SDK_INT>=31) req.launch(arrayOf(Manifest.permission.BLUETOOTH_SCAN,Manifest.permission.BLUETOOTH_CONNECT)) else ble.scanAndConnect()
         }

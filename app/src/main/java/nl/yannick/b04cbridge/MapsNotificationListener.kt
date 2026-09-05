@@ -15,6 +15,19 @@ class MapsNotificationListener: NotificationListenerService(){
     private var lastProgressSignature = ""
     private var lastKnownTotalDistance: Int? = null
 
+    private data class ProgressMeta(
+        val current:Int?,
+        val max:Int?,
+        val segmentLengths:List<Int>,
+        val pointPositions:List<Int>
+    ){
+        fun remainingMeters():Int?{
+            if(current!=null && max!=null && current>=0 && max>=current) return max-current
+            if(segmentLengths.isNotEmpty()) return segmentLengths.last()
+            return null
+        }
+    }
+
     override fun onListenerConnected() {
         super.onListenerConnected()
         BridgeState.log("Google Maps meldingstoegang actief")
@@ -43,7 +56,6 @@ class MapsNotificationListener: NotificationListenerService(){
             Notification.EXTRA_SUMMARY_TEXT
         ).forEach { key -> addLine(lines,e.getCharSequence(key)) }
 
-        // Maps changes notification keys between Android/Maps versions, so inspect all text extras.
         for(key in e.keySet()){
             when(val value=e.get(key)){
                 is CharSequence -> addLine(lines,value)
@@ -51,9 +63,7 @@ class MapsNotificationListener: NotificationListenerService(){
             }
         }
 
-        // Android 16 Maps uses ProgressStyle. Log its numeric metadata separately so we can see
-        // whether its progress units correspond to route distance even when the visible text says 0 m.
-        inspectProgressExtras(e)
+        val progress=inspectProgressExtras(e)
 
         runCatching {
             val mapsCtx=createPackageContext(sbn.packageName,Context.CONTEXT_IGNORE_SECURITY)
@@ -79,7 +89,17 @@ class MapsNotificationListener: NotificationListenerService(){
 
         val distances = findDistances(cleanLines)
         val currentDistance = chooseCurrentDistance(cleanLines,distances) ?: 0
-        chooseRemainingDistance(cleanLines,distances)?.let { lastKnownTotalDistance=it }
+
+        // On the user's Android 16 Google Maps build, ProgressStyle is expressed in meters:
+        // e.g. current=2, max=1581 while Maps itself shows 1.6 km remaining.
+        // Prefer that live value over text fields, which may contain stale/zero distances.
+        val progressRemaining=progress.remainingMeters()
+        if(progressRemaining!=null && progressRemaining>=0){
+            lastKnownTotalDistance=progressRemaining
+        } else {
+            chooseRemainingDistance(cleanLines,distances)?.let { lastKnownTotalDistance=it }
+        }
+
         val totalDistance = lastKnownTotalDistance ?: 0
         val maneuver=parseManeuver(cleanLines) ?: Protocol.STRAIGHT
 
@@ -92,7 +112,7 @@ class MapsNotificationListener: NotificationListenerService(){
         }
     }
 
-    private fun inspectProgressExtras(e:Bundle){
+    private fun inspectProgressExtras(e:Bundle):ProgressMeta{
         val current = numberValue(e.get("android.progress"))
         val max = numberValue(e.get("android.progressMax"))
         val indeterminate = e.get("android.progressIndeterminate")
@@ -116,6 +136,7 @@ class MapsNotificationListener: NotificationListenerService(){
             lastProgressSignature=sig
             BridgeState.log("PROGRESS: $sig")
         }
+        return ProgressMeta(current,max,segmentLengths,pointPositions)
     }
 
     private fun numberValue(v:Any?):Int? = when(v){

@@ -22,6 +22,7 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
     private var writeChar: BluetoothGattCharacteristic? = null
     private var notifyChar: BluetoothGattCharacteristic? = null
     private var challenge: ByteArray? = null
+    private var awaitingAuthReply = false
     private val txQueue = ArrayDeque<ByteArray>()
     private var writeBusy = false
     var ready = false; private set
@@ -31,7 +32,9 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
     @SuppressLint("MissingPermission")
     fun scanAndConnect() {
         if (!hasPerm()) { log("Bluetooth-toestemming ontbreekt"); return }
-        ready=false; challenge=null; txQueue.clear(); writeBusy=false
+        ready=false; challenge=null; awaitingAuthReply=false; txQueue.clear(); writeBusy=false
+        try { gatt?.close() } catch(_:Exception) {}
+        gatt=null
         log("Scannen naar B04C...")
         val scanner=adapter.bluetoothLeScanner ?: run { log("BLE scanner niet beschikbaar"); return }
         val cb=object: ScanCallback(){
@@ -51,7 +54,7 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
     private val gattCb=object:BluetoothGattCallback(){
         @SuppressLint("MissingPermission") override fun onConnectionStateChange(g:BluetoothGatt,status:Int,newState:Int){
             if(newState==BluetoothProfile.STATE_CONNECTED){ log("GATT verbonden; MTU aanvragen..."); g.requestMtu(64) }
-            else { ready=false; writeBusy=false; txQueue.clear(); log("Verbinding weg (status $status)") }
+            else { ready=false; challenge=null; awaitingAuthReply=false; writeBusy=false; txQueue.clear(); log("Verbinding weg (status $status)") }
         }
         @SuppressLint("MissingPermission") override fun onMtuChanged(g:BluetoothGatt, mtu:Int,status:Int){ log("MTU=$mtu"); g.discoverServices() }
         @SuppressLint("MissingPermission") override fun onServicesDiscovered(g:BluetoothGatt,status:Int){
@@ -62,14 +65,14 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
             g.setCharacteristicNotification(notifyChar,true)
             val cccd=notifyChar!!.getDescriptor(UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"))
             if(cccd!=null){ cccd.value=BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE; g.writeDescriptor(cccd) }
-            android.os.Handler(context.mainLooper).postDelayed({ write(Protocol.readChallenge()) },800)
+            android.os.Handler(context.mainLooper).postDelayed({ write(Protocol.readChallenge()) },1000)
         }
         override fun onCharacteristicChanged(g:BluetoothGatt,c:BluetoothGattCharacteristic){ handleRx(c.value) }
         override fun onCharacteristicChanged(g:BluetoothGatt,c:BluetoothGattCharacteristic,value:ByteArray){ handleRx(value) }
         @SuppressLint("MissingPermission") override fun onCharacteristicWrite(g:BluetoothGatt,c:BluetoothGattCharacteristic,status:Int){
             writeBusy=false
             if(status!=BluetoothGatt.GATT_SUCCESS) log("Schrijffout GATT status=$status")
-            sendNext()
+            android.os.Handler(context.mainLooper).postDelayed({ sendNext() },80)
         }
     }
 
@@ -77,15 +80,16 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
         log("RX "+v.joinToString(" "){"%02X".format(it)})
         if(v.size>=8 && v[0]==0x55.toByte() && v[1]==0xAA.toByte()){
             val len=v[2].toInt() and 255
+            val target=v.getOrNull(4)?.toInt()?.and(255) ?: -1
             val sub=v.getOrNull(5)?.toInt()?.and(255) ?: -1
             val param=v.getOrNull(6)?.toInt()?.and(255) ?: -1
-            if(param==0 && len>=4 && challenge==null){
+            if(target==0x10 && sub==0x04 && param==0 && len>=4 && !awaitingAuthReply){
                 val p=v.copyOfRange(7, minOf(11,v.size))
-                if(p.size==4){ challenge=p; log("Challenge ontvangen; authenticeren..."); authenticate(p) }
-            } else if(param==0 && sub in listOf(0x20,4,5)) {
+                if(p.size==4){ challenge=p; awaitingAuthReply=true; log("Challenge ontvangen; authenticeren..."); authenticate(p) }
+            } else if(target==0x10 && param==0 && awaitingAuthReply) {
                 val ok=v.getOrNull(7)?.toInt()?.and(255)==0
-                if(ok){ ready=true; log("AUTH OK — display klaar"); write(Protocol.syncTime(System.currentTimeMillis()/1000)) }
-                else log("AUTH geweigerd")
+                if(ok){ awaitingAuthReply=false; ready=true; log("AUTH OK — display klaar"); write(Protocol.syncTime(System.currentTimeMillis()/1000)) }
+                else log("Auth-antwoord ontvangen: sub=%02X payload=%02X".format(sub, v.getOrNull(7)?.toInt()?.and(255) ?: -1))
             }
         }
     }
@@ -99,7 +103,7 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
         }catch(e:Exception){log("AES fout: ${e.message}")}
     }
 
-    @Synchronized fun write(bytes:ByteArray){ txQueue.add(bytes.copyOf()); sendNext() }
+    @Synchronized fun write(bytes:ByteArray){ txQueue.addLast(bytes.copyOf()); sendNext() }
 
     @SuppressLint("MissingPermission") @Synchronized private fun sendNext(){
         if(writeBusy || txQueue.isEmpty()) return
@@ -109,8 +113,12 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
         c.value=bytes
         writeBusy=true
         val ok=gatt?.writeCharacteristic(c) ?: false
-        if(!ok){ writeBusy=false; log("TX START MISLUKT "+bytes.joinToString(" "){"%02X".format(it)}); android.os.Handler(context.mainLooper).postDelayed({ sendNext() },150) }
-        else log("TX "+bytes.joinToString(" "){"%02X".format(it)})
+        if(!ok){
+            writeBusy=false
+            txQueue.addFirst(bytes)
+            log("BLE bezet; TX opnieuw proberen...")
+            android.os.Handler(context.mainLooper).postDelayed({ sendNext() },250)
+        } else log("TX "+bytes.joinToString(" "){"%02X".format(it)})
     }
 
     fun testNav(man:Int,dist:Int=250){ if(!ready){ log("Nog niet geauthenticeerd — test niet verstuurd"); return }; write(Protocol.nav(dist,man,2500)) }

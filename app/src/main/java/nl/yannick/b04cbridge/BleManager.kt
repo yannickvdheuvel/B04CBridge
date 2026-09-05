@@ -80,16 +80,24 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
         log("RX "+v.joinToString(" "){"%02X".format(it)})
         if(v.size>=8 && v[0]==0x55.toByte() && v[1]==0xAA.toByte()){
             val len=v[2].toInt() and 255
+            val direction=v.getOrNull(3)?.toInt()?.and(255) ?: -1
             val target=v.getOrNull(4)?.toInt()?.and(255) ?: -1
             val sub=v.getOrNull(5)?.toInt()?.and(255) ?: -1
             val param=v.getOrNull(6)?.toInt()?.and(255) ?: -1
-            if(target==0x10 && sub==0x04 && param==0 && len>=4 && !awaitingAuthReply){
+
+            // Display -> phone frames use direction 0x10 and target 0x11.
+            if(direction==0x10 && target==0x11 && sub==0x04 && param==0 && len>=4 && !awaitingAuthReply){
                 val p=v.copyOfRange(7, minOf(11,v.size))
                 if(p.size==4){ challenge=p; awaitingAuthReply=true; log("Challenge ontvangen; authenticeren..."); authenticate(p) }
-            } else if(target==0x10 && param==0 && awaitingAuthReply) {
-                val ok=v.getOrNull(7)?.toInt()?.and(255)==0
-                if(ok){ awaitingAuthReply=false; ready=true; log("AUTH OK — display klaar"); write(Protocol.syncTime(System.currentTimeMillis()/1000)) }
-                else log("Auth-antwoord ontvangen: sub=%02X payload=%02X".format(sub, v.getOrNull(7)?.toInt()?.and(255) ?: -1))
+            } else if(direction==0x10 && target==0x11 && param==0 && awaitingAuthReply) {
+                val reply=v.getOrNull(7)?.toInt()?.and(255) ?: -1
+                if(reply==0){
+                    awaitingAuthReply=false; ready=true
+                    log("AUTH OK — display klaar")
+                    write(Protocol.syncTime(System.currentTimeMillis()/1000))
+                } else {
+                    log("Auth-antwoord ontvangen: sub=%02X payload=%02X".format(sub, reply))
+                }
             }
         }
     }

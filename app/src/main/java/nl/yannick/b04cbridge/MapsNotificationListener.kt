@@ -2,6 +2,7 @@ package nl.yannick.b04cbridge
 
 import android.app.Notification
 import android.content.Context
+import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
 import android.view.LayoutInflater
@@ -11,6 +12,7 @@ import android.widget.TextView
 
 class MapsNotificationListener: NotificationListenerService(){
     private var lastSignature = ""
+    private var lastProgressSignature = ""
     private var lastKnownTotalDistance: Int? = null
 
     override fun onListenerConnected() {
@@ -32,7 +34,6 @@ class MapsNotificationListener: NotificationListenerService(){
         val lines = LinkedHashSet<String>()
         val e=sbn.notification.extras
 
-        // Standard notification fields.
         listOf(
             Notification.EXTRA_TITLE,
             Notification.EXTRA_TEXT,
@@ -42,7 +43,7 @@ class MapsNotificationListener: NotificationListenerService(){
             Notification.EXTRA_SUMMARY_TEXT
         ).forEach { key -> addLine(lines,e.getCharSequence(key)) }
 
-        // Also inspect every text-like extra: Maps changes which keys it uses between versions.
+        // Maps changes notification keys between Android/Maps versions, so inspect all text extras.
         for(key in e.keySet()){
             when(val value=e.get(key)){
                 is CharSequence -> addLine(lines,value)
@@ -50,7 +51,10 @@ class MapsNotificationListener: NotificationListenerService(){
             }
         }
 
-        // Recover the custom Google Maps RemoteViews and collect visible/accessibility text.
+        // Android 16 Maps uses ProgressStyle. Log its numeric metadata separately so we can see
+        // whether its progress units correspond to route distance even when the visible text says 0 m.
+        inspectProgressExtras(e)
+
         runCatching {
             val mapsCtx=createPackageContext(sbn.packageName,Context.CONTEXT_IGNORE_SECURITY)
             val builder=Notification.Builder.recoverBuilder(this,sbn.notification)
@@ -88,6 +92,50 @@ class MapsNotificationListener: NotificationListenerService(){
         }
     }
 
+    private fun inspectProgressExtras(e:Bundle){
+        val current = numberValue(e.get("android.progress"))
+        val max = numberValue(e.get("android.progressMax"))
+        val indeterminate = e.get("android.progressIndeterminate")
+        val segments = bundleList(e.get("android.progressSegments"))
+        val points = bundleList(e.get("android.progressPoints"))
+        val segmentLengths = segments.mapNotNull { numberValue(it.get("length")) }
+        val pointPositions = points.mapNotNull { numberValue(it.get("position")) }
+        val segmentSum = if(segmentLengths.isNotEmpty()) segmentLengths.sum() else null
+
+        val interestingNumbers = e.keySet()
+            .mapNotNull { key ->
+                val value=e.get(key)
+                val n=numberValue(value)
+                if(n!=null && key !in setOf("android.progress","android.progressMax")) "$key=$n" else null
+            }
+            .sorted()
+            .take(12)
+
+        val sig="current=$current max=$max ind=$indeterminate seg=$segmentLengths sum=$segmentSum points=$pointPositions nums=$interestingNumbers"
+        if(sig!=lastProgressSignature){
+            lastProgressSignature=sig
+            BridgeState.log("PROGRESS: $sig")
+        }
+    }
+
+    private fun numberValue(v:Any?):Int? = when(v){
+        is Int -> v
+        is Long -> v.coerceIn(Int.MIN_VALUE.toLong(),Int.MAX_VALUE.toLong()).toInt()
+        is Short -> v.toInt()
+        is Byte -> v.toInt()
+        is Float -> v.toInt()
+        is Double -> v.toInt()
+        else -> null
+    }
+
+    private fun bundleList(v:Any?):List<Bundle>{
+        return when(v){
+            is ArrayList<*> -> v.filterIsInstance<Bundle>()
+            is Array<*> -> v.filterIsInstance<Bundle>()
+            else -> emptyList()
+        }
+    }
+
     private fun collectText(v:View,lines:MutableSet<String>){
         if(v is TextView) addLine(lines,v.text)
         addLine(lines,v.contentDescription)
@@ -100,8 +148,6 @@ class MapsNotificationListener: NotificationListenerService(){
     }
 
     private fun parseManeuver(lines:List<String>):Int?{
-        // Check actual instruction lines only. ETA text like "Aankomst om 21:06" is metadata,
-        // not an arrival maneuver.
         for(line in lines){
             val t=line.lowercase().trim()
             if(isMetadataLine(t)) continue
@@ -144,7 +190,6 @@ class MapsNotificationListener: NotificationListenerService(){
     }
 
     private fun chooseCurrentDistance(lines:List<String>, distances:List<Int>):Int?{
-        // Prefer a standalone distance / distance paired with the maneuver instruction.
         val re=Regex("^\\s*(\\d+(?:[.,]\\d+)?)\\s*(km|m)\\s*$",RegexOption.IGNORE_CASE)
         lines.forEach { line ->
             val m=re.find(line) ?: return@forEach

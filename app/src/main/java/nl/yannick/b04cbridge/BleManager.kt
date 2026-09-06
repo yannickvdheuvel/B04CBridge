@@ -35,6 +35,7 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
     private var reconnectScheduled = false
     private var reconnectAttempt = 0
     private var lastTelemetryLogAt = 0L
+    private var lastStatsLogAt = 0L
     var ready = false; private set
 
     init { log("B04C Bridge BLE code r22-auto-reconnect+telemetry") }
@@ -173,6 +174,9 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
 
     private fun decodeTelemetry(v:ByteArray,target:Int,sub:Int,param:Int){
         // Tijdens de echte rit gecorreleerd met het scherm: 06/01 bevat snelheid, TRIP en ODO.
+        // Byte 12/13/14 zijn daarna live vastgesteld door vanaf de laptop mee te lezen terwijl
+        // het assistniveau werd omgeschakeld: byte 12 liep 00..05 mee met de knoppen, byte 13
+        // bleef op de bovengrens staan en byte 14 was 0x12 terwijl het scherm 18% accu toonde.
         if(target==0x11 && sub==0x06 && param==0x01 && v.size>=28){
             val speedRaw=u16le(v,16)
             val tripRaw=u32le(v,18)
@@ -180,13 +184,39 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
             val speed=speedRaw/100.0
             val tripMeters=(tripRaw*10L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
             val odoMeters=odoRaw*10L
+            val assist=v[12].toInt() and 255
+            val assistMax=v[13].toInt() and 255
+            val battery=v[14].toInt() and 255
             BridgeState.bikeSpeedKph=speed
             BridgeState.bikeTripMeters=tripMeters
             BridgeState.bikeOdoMeters=odoMeters
+            BridgeState.bikeAssist=assist
+            BridgeState.bikeAssistMax=assistMax
+            BridgeState.bikeBatteryPercent=battery
             val now=System.currentTimeMillis()
             if(now-lastTelemetryLogAt>=5000){
                 lastTelemetryLogAt=now
-                log("FIETSDATA: %.1f km/h, trip %.2f km, odo %.2f km".format(speed,tripMeters/1000.0,odoMeters/1000.0))
+                log("FIETSDATA: %.1f km/h, trip %.2f km, odo %.2f km, assist %d/%d, accu %d%%"
+                    .format(speed,tripMeters/1000.0,odoMeters/1000.0,assist,assistMax,battery))
+            }
+        }
+
+        // 06/09 = ritstatistiek. Twee velden zijn op echte ritdata gecontroleerd:
+        //   payload[0..1] rijtijd in seconden  (30,23 km / 18,53 km/h = 5873 s, gemeten 5870)
+        //   payload[4..5] gemiddelde snelheid in 0,01 km/h (3D 07 = 18,53 -> scherm toonde AVG 18,5)
+        // payload[6..7] staat over twee sessies onveranderd op 0x1178 (44,72?) en is mogelijk de
+        // maximumsnelheid van de rit; die en de resterende bytes worden nog gelogd om te herleiden.
+        if(target==0x11 && sub==0x06 && param==0x09 && v.size>=25){
+            val rideSeconds=u16le(v,7)
+            val avgKph=u16le(v,11)/100.0
+            BridgeState.bikeRideSeconds=rideSeconds
+            BridgeState.bikeAvgKph=avgKph
+            val now=System.currentTimeMillis()
+            if(now-lastStatsLogAt>=15000){
+                lastStatsLogAt=now
+                val rest=v.copyOfRange(13,minOf(23,v.size)).joinToString(" "){"%02X".format(it)}
+                log("RITSTAT: gem %.2f km/h, rijtijd %d:%02d:%02d, onbekend[6..15]=%s"
+                    .format(avgKph,rideSeconds/3600,(rideSeconds/60)%60,rideSeconds%60,rest))
             }
         }
     }
@@ -236,6 +266,13 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
     }
 
     fun testNav(man:Int,dist:Int=250){ if(!ready){ log("Nog niet geauthenticeerd — test niet verstuurd"); return }; write(Protocol.nav(dist,man,2500)) }
-    fun sendMapsNav(man:Int,dist:Int,total:Int){ if(!ready){ log("Navigatie ontvangen, maar B04C is niet klaar"); return }; write(Protocol.navDetailed(dist,man,0,Protocol.STRAIGHT,0,Protocol.STRAIGHT,total)) }
+    // Het B04C toont de tweede manoeuvre echt: op de laptop-rig gaf nav(350,links,1200,rechts,...)
+    // een grote linkerpijl met 0,3 km en daarboven een kleine rechterpijl met 1,2 km. Het derde
+    // slot komt nergens op het scherm terug. Manoeuvrecode 0 is géén bruikbare "onbekend"-waarde:
+    // daarmee zet het display zowel de bochtafstand als de totale route op 0,0 km.
+    fun sendMapsNav(man:Int,dist:Int,total:Int,nextMan:Int=Protocol.STRAIGHT,nextDist:Int=0){
+        if(!ready){ log("Navigatie ontvangen, maar B04C is niet klaar"); return }
+        write(Protocol.navDetailed(dist,man,nextDist,nextMan,0,Protocol.STRAIGHT,total))
+    }
     fun stopNav(){ if(ready) write(Protocol.stopNav()) }
 }

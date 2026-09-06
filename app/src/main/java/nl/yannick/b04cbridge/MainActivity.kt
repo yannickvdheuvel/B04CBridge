@@ -106,6 +106,11 @@ object BridgeState {
     @Volatile var bikeSpeedKph:Double?=null
     @Volatile var bikeTripMeters:Int?=null
     @Volatile var bikeOdoMeters:Long?=null
+    @Volatile var bikeAvgKph:Double?=null
+    @Volatile var bikeRideSeconds:Int?=null
+    @Volatile var bikeAssist:Int?=null
+    @Volatile var bikeAssistMax:Int?=null
+    @Volatile var bikeBatteryPercent:Int?=null
 
     private val logLines=java.util.ArrayDeque<String>()
 

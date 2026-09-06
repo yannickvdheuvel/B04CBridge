@@ -16,6 +16,14 @@ object Protocol {
     const val UTURN = 8
     const val ARRIVE = 10
 
+    // Op de laptop-rig codes 1..20 stuk voor stuk naar het display gestuurd en afgelezen.
+    // 1..8 en 10 hebben elk hun eigen pijl; 9, 11..18 en 20 tonen allemaal de omkeerpijl.
+    // Een onbekende code mag dus nooit doorlekken: dan krijgt de fietser "keer om" te zien
+    // terwijl hij rechtdoor moet. Alles wat we niet kennen wordt daarom rechtdoor.
+    private val KNOWN_MANEUVERS = setOf(STRAIGHT, LEFT, RIGHT, SLIGHT_LEFT, SLIGHT_RIGHT, SHARP_LEFT, SHARP_RIGHT, UTURN, ARRIVE)
+
+    fun safeManeuver(code: Int): Int = if (code in KNOWN_MANEUVERS) code else STRAIGHT
+
     private var seq = 0
 
     fun frame(target: Int, sub: Int, param: Int, payload: ByteArray): ByteArray {
@@ -73,9 +81,9 @@ object Protocol {
         }
 
         val payload = byteArrayOf((seq++ and 255).toByte(), 0x02) +
-            u24(currentDist) + byteArrayOf(currentMan.toByte()) +
-            u24(nextDist) + byteArrayOf(nextMan.toByte()) +
-            u24(nextNextDist) + byteArrayOf(nextNextMan.toByte()) +
+            u24(currentDist) + byteArrayOf(safeManeuver(currentMan).toByte()) +
+            u24(nextDist) + byteArrayOf(safeManeuver(nextMan).toByte()) +
+            u24(nextNextDist) + byteArrayOf(safeManeuver(nextNextMan).toByte()) +
             u32(total)
 
         return frame(0xF1, 0x03, 0x00, payload)

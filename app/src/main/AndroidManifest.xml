@@ -6,6 +6,15 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
+    <!-- Zonder <queries> mag deze app (targetSdk>=30) de Maps/Komoot packages niet "zien".
+         Daardoor faalden createPackageContext() en getResourcesForApplication() met
+         NameNotFoundException, en konden we de RemoteViews en de manoeuvre-iconen
+         van de navigatiemelding niet uitlezen. -->
+    <queries>
+        <package android:name="com.google.android.apps.maps" />
+        <package android:name="de.komoot.android" />
+    </queries>
+
     <application
         android:name=".B04CApplication"
         android:theme="@style/Theme.B04CBridge"

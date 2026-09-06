@@ -318,6 +318,7 @@ class MapsNotificationListener: NotificationListenerService(){
         for(line in lines){
             val t=line.lowercase().trim(); if(isMetadataLine(t)) continue
             when {
+                isRoundabout(t) -> return roundaboutManeuver(t)
                 "u-turn" in t || "u turn" in t || "keer om" in t || "omkeren" in t || "wenden" in t -> return Protocol.UTURN
                 "flauw links" in t || "lichte bocht links" in t || "slight left" in t || "houd links" in t || "keep left" in t || "leicht links" in t -> return Protocol.SLIGHT_LEFT
                 "flauw rechts" in t || "lichte bocht rechts" in t || "slight right" in t || "houd rechts" in t || "keep right" in t || "leicht rechts" in t -> return Protocol.SLIGHT_RIGHT
@@ -330,6 +331,26 @@ class MapsNotificationListener: NotificationListenerService(){
             }
         }
         return null
+    }
+
+    // Het B04C kent geen rotondesymbool: elke code buiten 1..8 en 10 toont een omkeerpijl.
+    // Daarom vertalen we het afslagnummer naar een gewone richting. Bij rechts rijdend
+    // verkeer is de 1e afslag rechtsaf, de 2e rechtdoor en de 3e linksaf; daarna zit je
+    // bijna terug waar je vandaan kwam, dus scherp links. Zonder herkenbaar nummer is
+    // rechtdoor de veiligste gok — dat is verreweg de meest voorkomende rotondeafslag.
+    private fun isRoundabout(t:String)=
+        "rotonde" in t || "roundabout" in t || "kreisverkehr" in t || "traffic circle" in t
+
+    private fun roundaboutManeuver(t:String):Int{
+        val exit=Regex("(\\d+)\\s*(?:e|de|ste|st|nd|rd|th|\\.)?\\s*(?:afslag|exit|ausfahrt)")
+            .find(t)?.groupValues?.get(1)?.toIntOrNull()
+        return when(exit){
+            1 -> Protocol.RIGHT
+            2 -> Protocol.STRAIGHT
+            3 -> Protocol.LEFT
+            null -> Protocol.STRAIGHT
+            else -> Protocol.SHARP_LEFT
+        }
     }
 
     private fun isMetadataLine(t:String):Boolean{

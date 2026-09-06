@@ -183,9 +183,14 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
         scheduleArmedScan()
     }
 
-    // Op een echte rit bleef het aanhoudende verzoek staan zonder ooit te verbinden, en omdat
-    // de app daarna niets meer probeerde bleef het display de hele terugweg leeg. Daarom loopt
-    // er nu elke minuut een korte scan naast: vindt die het display, dan pakken we het zelf op.
+    // Zodra het aanhoudende verzoek geplaatst is probeert de app zelf niets meer, en dan hangt
+    // alles af van Android. Daarom loopt er elke minuut een korte scan naast: ziet die het
+    // display, dan pakken we het zelf op.
+    //
+    // Dit is niet gebouwd naar aanleiding van een echte storing. De rit waarin dit verzoek voor
+    // het eerst werd geplaatst leek een probleem, maar daar was de fiets simpelweg buiten bereik
+    // -- de eigenaar loopt na het fietsen weg zonder het display uit te zetten. Dat is ook het
+    // scenario waarin dit vangnet het nuttigst is: bij terugkomst wordt vanzelf weer verbonden.
     @SuppressLint("MissingPermission")
     private fun scheduleArmedScan(){
         handler.postDelayed({

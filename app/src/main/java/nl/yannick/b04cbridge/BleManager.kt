@@ -180,6 +180,43 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
         if(g==null){ log("Aanhoudend verbindingsverzoek mislukt; opnieuw proberen"); reconnectAttempt=0; scheduleReconnect(); return }
         autoConnectGatt=g; gatt=g; connecting=false
         log("Aanhoudend verbindingsverzoek geplaatst bij ${device.address}; Android verbindt zodra het display zich meldt")
+        scheduleArmedScan()
+    }
+
+    // Op een echte rit bleef het aanhoudende verzoek staan zonder ooit te verbinden, en omdat
+    // de app daarna niets meer probeerde bleef het display de hele terugweg leeg. Daarom loopt
+    // er nu elke minuut een korte scan naast: vindt die het display, dan pakken we het zelf op.
+    @SuppressLint("MissingPermission")
+    private fun scheduleArmedScan(){
+        handler.postDelayed({
+            if(!connectionWanted || ready || connecting || autoConnectGatt==null) return@postDelayed
+            val scanner=if(hasScanPerm()) adapter.bluetoothLeScanner else null
+            if(scanner==null){ scheduleArmedScan(); return@postDelayed }
+            lateinit var cb: ScanCallback
+            cb=object: ScanCallback(){
+                override fun onScanResult(type:Int,result:ScanResult){
+                    runCatching { scanner.stopScan(this) }
+                    if(!connectionWanted || ready || connecting) return
+                    log("Vangnet zag ${result.device.address}; aanhoudend verzoek vervangen door directe verbinding")
+                    lastDevice=result.device
+                    cancelAutoConnect()
+                    connectDevice(result.device,true)
+                }
+                override fun onScanFailed(errorCode:Int){}
+            }
+            val started=runCatching {
+                scanner.startScan(
+                    listOf(ScanFilter.Builder().setDeviceName("B04C-BF").build()),
+                    ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_POWER).build(),
+                    cb
+                ); true
+            }.getOrDefault(false)
+            if(!started){ scheduleArmedScan(); return@postDelayed }
+            handler.postDelayed({
+                runCatching { scanner.stopScan(cb) }
+                scheduleArmedScan()
+            },8000)
+        },60000)
     }
 
     @SuppressLint("MissingPermission")

@@ -288,7 +288,12 @@ class MapsNotificationListener: NotificationListenerService(){
     private fun numberValue(v:Any?):Int?=when(v){
         is Int->v; is Long->v.coerceIn(Int.MIN_VALUE.toLong(),Int.MAX_VALUE.toLong()).toInt(); is Short->v.toInt(); is Byte->v.toInt(); is Float->v.toInt(); is Double->v.toInt(); else->null
     }
-    private fun bundleList(v:Any?):List<Bundle>=when(v){ is ArrayList<*>->v.filterIsInstance<Bundle>(); is Array<*>->v.filterIsInstance<Bundle>(); else->emptyList() }
+
+    private fun bundleList(v:Any?):List<Bundle> = when(v){
+        is ArrayList<*> -> v.filterIsInstance<Bundle>()
+        is Array<*> -> v.filterIsInstance<Bundle>()
+        else -> emptyList()
+    }
 
     private fun collectText(v:View,lines:MutableSet<String>){
         if(v is TextView) addLine(lines,v.text)

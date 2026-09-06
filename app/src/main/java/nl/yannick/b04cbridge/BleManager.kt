@@ -10,6 +10,8 @@ import android.bluetooth.le.ScanSettings
 import android.content.Context
 import android.content.pm.PackageManager
 import android.os.Build
+import android.os.Handler
+import android.os.Looper
 import androidx.core.content.ContextCompat
 import java.util.UUID
 import java.util.ArrayDeque
@@ -18,6 +20,7 @@ import javax.crypto.spec.SecretKeySpec
 
 class BleManager(private val context: Context, private val log: (String)->Unit) {
     private val adapter = (context.getSystemService(Context.BLUETOOTH_SERVICE) as BluetoothManager).adapter
+    private val handler = Handler(Looper.getMainLooper())
     private var gatt: BluetoothGatt? = null
     private var writeChar: BluetoothGattCharacteristic? = null
     private var notifyChar: BluetoothGattCharacteristic? = null
@@ -25,36 +28,162 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
     private var awaitingAuthReply = false
     private val txQueue = ArrayDeque<ByteArray>()
     private var writeBusy = false
+    private var lastDevice: BluetoothDevice? = null
+    private var activeScan: ScanCallback? = null
+    private var connectionWanted = false
+    private var connecting = false
+    private var reconnectScheduled = false
+    private var reconnectAttempt = 0
     var ready = false; private set
 
+    init {
+        log("B04C Bridge BLE code r21-auto-reconnect")
+    }
+
     private fun hasPerm() = Build.VERSION.SDK_INT < 31 || ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT)==PackageManager.PERMISSION_GRANTED
+    private fun hasScanPerm() = Build.VERSION.SDK_INT < 31 || ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN)==PackageManager.PERMISSION_GRANTED
+
+    private fun resetSessionState(){
+        ready=false
+        challenge=null
+        awaitingAuthReply=false
+        writeBusy=false
+        txQueue.clear()
+        writeChar=null
+        notifyChar=null
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun stopActiveScan(){
+        val cb=activeScan ?: return
+        activeScan=null
+        runCatching { adapter.bluetoothLeScanner?.stopScan(cb) }
+    }
 
     @SuppressLint("MissingPermission")
     fun scanAndConnect() {
-        if (!hasPerm()) { log("Bluetooth-toestemming ontbreekt"); return }
-        ready=false; challenge=null; awaitingAuthReply=false; txQueue.clear(); writeBusy=false
+        if (!hasPerm() || !hasScanPerm()) { log("Bluetooth-toestemming ontbreekt"); return }
+        connectionWanted=true
+        reconnectAttempt=0
+        reconnectScheduled=false
+        startScan(manual=true)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun startScan(manual:Boolean=false){
+        if(!connectionWanted || ready || connecting) return
+        if (!hasPerm() || !hasScanPerm()) { log("Bluetooth-toestemming ontbreekt"); return }
+
+        stopActiveScan()
+        resetSessionState()
         try { gatt?.close() } catch(_:Exception) {}
         gatt=null
-        log("Scannen naar B04C...")
-        val scanner=adapter.bluetoothLeScanner ?: run { log("BLE scanner niet beschikbaar"); return }
-        val cb=object: ScanCallback(){
+
+        log(if(manual) "Scannen naar B04C..." else "Auto-reconnect: scannen naar B04C...")
+        val scanner=adapter.bluetoothLeScanner ?: run {
+            log("BLE scanner niet beschikbaar")
+            scheduleReconnect()
+            return
+        }
+
+        lateinit var cb: ScanCallback
+        cb=object: ScanCallback(){
             override fun onScanResult(type:Int,result:ScanResult){
-                val n=result.device.name ?: result.scanRecord?.deviceName ?: ""
+                val n=runCatching { result.device.name }.getOrNull() ?: result.scanRecord?.deviceName ?: ""
                 if(n.startsWith("B04C",true)){
-                    scanner.stopScan(this); log("Gevonden: $n, verbinden...")
-                    gatt=result.device.connectGatt(context,false,gattCb,BluetoothDevice.TRANSPORT_LE)
+                    if(activeScan===this) activeScan=null
+                    runCatching { scanner.stopScan(this) }
+                    lastDevice=result.device
+                    log("Gevonden: $n, verbinden...")
+                    connectDevice(result.device, false)
                 }
             }
-            override fun onScanFailed(errorCode:Int){ log("Scan fout $errorCode") }
+            override fun onScanFailed(errorCode:Int){
+                if(activeScan===this) activeScan=null
+                log("Scan fout $errorCode")
+                scheduleReconnect()
+            }
         }
+        activeScan=cb
         scanner.startScan(listOf(ScanFilter.Builder().setDeviceName("B04C-BF").build()), ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), cb)
-        android.os.Handler(context.mainLooper).postDelayed({ try{scanner.stopScan(cb)}catch(_:Exception){} },15000)
+
+        handler.postDelayed({
+            if(activeScan===cb){
+                activeScan=null
+                runCatching { scanner.stopScan(cb) }
+                if(connectionWanted && !ready && !connecting){
+                    log("B04C niet gevonden; automatisch opnieuw proberen")
+                    scheduleReconnect()
+                }
+            }
+        },12000)
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun connectDevice(device:BluetoothDevice, reconnect:Boolean){
+        if(!connectionWanted || ready || connecting) return
+        if(!hasPerm()) return
+        stopActiveScan()
+        resetSessionState()
+        connecting=true
+        if(reconnect) log("Auto-reconnect: direct opnieuw verbinden...")
+
+        val newGatt=runCatching {
+            device.connectGatt(context,false,gattCb,BluetoothDevice.TRANSPORT_LE)
+        }.getOrElse {
+            connecting=false
+            log("Verbinden mislukt: ${it.message}")
+            scheduleReconnect()
+            return
+        }
+        gatt=newGatt
+
+        handler.postDelayed({
+            if(connectionWanted && connecting && !ready && gatt===newGatt){
+                log("Verbinding duurt te lang; opnieuw proberen...")
+                connecting=false
+                runCatching { newGatt.disconnect() }
+                runCatching { newGatt.close() }
+                if(gatt===newGatt) gatt=null
+                scheduleReconnect()
+            }
+        },12000)
+    }
+
+    private fun scheduleReconnect(){
+        if(!connectionWanted || ready || connecting || reconnectScheduled) return
+        val delays=longArrayOf(1500,3000,5000,10000,15000,30000)
+        val delay=delays[minOf(reconnectAttempt,delays.lastIndex)]
+        val attempt=++reconnectAttempt
+        reconnectScheduled=true
+        log("Auto-reconnect poging $attempt over ${delay/1000.0}s")
+        handler.postDelayed({
+            reconnectScheduled=false
+            if(!connectionWanted || ready || connecting) return@postDelayed
+            val device=lastDevice
+            if(device!=null && attempt<=2) connectDevice(device,true)
+            else startScan(false)
+        },delay)
     }
 
     private val gattCb=object:BluetoothGattCallback(){
         @SuppressLint("MissingPermission") override fun onConnectionStateChange(g:BluetoothGatt,status:Int,newState:Int){
-            if(newState==BluetoothProfile.STATE_CONNECTED){ log("GATT verbonden; MTU aanvragen..."); g.requestMtu(64) }
-            else { ready=false; challenge=null; awaitingAuthReply=false; writeBusy=false; txQueue.clear(); log("Verbinding weg (status $status)") }
+            if(newState==BluetoothProfile.STATE_CONNECTED){
+                if(gatt!==g){ runCatching { g.close() }; return }
+                connecting=false
+                reconnectScheduled=false
+                reconnectAttempt=0
+                log("GATT verbonden; MTU aanvragen...")
+                g.requestMtu(64)
+            } else if(newState==BluetoothProfile.STATE_DISCONNECTED) {
+                val current=(gatt===g)
+                if(current) gatt=null
+                connecting=false
+                resetSessionState()
+                runCatching { g.close() }
+                log("Verbinding weg (status $status)")
+                if(current) scheduleReconnect()
+            }
         }
         @SuppressLint("MissingPermission") override fun onMtuChanged(g:BluetoothGatt, mtu:Int,status:Int){ log("MTU=$mtu"); g.discoverServices() }
         @SuppressLint("MissingPermission") override fun onServicesDiscovered(g:BluetoothGatt,status:Int){
@@ -65,14 +194,14 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
             g.setCharacteristicNotification(notifyChar,true)
             val cccd=notifyChar!!.getDescriptor(UUID.fromString("00002902-0000-1000-8000-00805f9b34fb"))
             if(cccd!=null){ cccd.value=BluetoothGattDescriptor.ENABLE_NOTIFICATION_VALUE; g.writeDescriptor(cccd) }
-            android.os.Handler(context.mainLooper).postDelayed({ write(Protocol.readChallenge()) },1000)
+            handler.postDelayed({ write(Protocol.readChallenge()) },1000)
         }
         override fun onCharacteristicChanged(g:BluetoothGatt,c:BluetoothGattCharacteristic){ handleRx(c.value) }
         override fun onCharacteristicChanged(g:BluetoothGatt,c:BluetoothGattCharacteristic,value:ByteArray){ handleRx(value) }
         @SuppressLint("MissingPermission") override fun onCharacteristicWrite(g:BluetoothGatt,c:BluetoothGattCharacteristic,status:Int){
             writeBusy=false
             if(status!=BluetoothGatt.GATT_SUCCESS) log("Schrijffout GATT status=$status")
-            android.os.Handler(context.mainLooper).postDelayed({ sendNext() },80)
+            handler.postDelayed({ sendNext() },80)
         }
     }
 
@@ -92,6 +221,7 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
                 val reply=v.getOrNull(7)?.toInt()?.and(255) ?: -1
                 if(reply==0){
                     awaitingAuthReply=false; ready=true
+                    reconnectAttempt=0
                     log("AUTH OK — display klaar")
                     write(Protocol.syncTime(System.currentTimeMillis()/1000))
                 } else {
@@ -124,7 +254,7 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
             writeBusy=false
             txQueue.addFirst(bytes)
             log("BLE bezet; TX opnieuw proberen...")
-            android.os.Handler(context.mainLooper).postDelayed({ sendNext() },250)
+            handler.postDelayed({ sendNext() },250)
         } else log("TX "+bytes.joinToString(" "){"%02X".format(it)})
     }
 

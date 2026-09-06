@@ -149,12 +149,13 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
         handler.postDelayed({
             reconnectScheduled=false
             if(!connectionWanted || ready || connecting) return@postDelayed
-            // Directe connect is de hoofdweg, precies zoals de originele app het doet: zolang
-            // Android de ACL-link vasthoudt adverteert het display niet en levert scannen niets
-            // op. Elke vierde poging tóch scannen, voor het geval het display een ander adres
-            // heeft gekregen of we het nog nooit gezien hebben.
+            // Er zijn twee storingen met tegengestelde remedies. Houdt Android de ACL-link vast,
+            // dan adverteert het display niet en vindt alleen een directe connect hem nog. Staat
+            // het display uit, dan kan een directe connect per definitie niet slagen en moet je
+            // scannen tot hij weer aangaat. Om en om proberen dekt beide binnen twee pogingen;
+            // op een echte uit/aan-test kostte drie-op-een nog twintig seconden.
             val device=knownDevice()
-            if(device!=null && attempt%4!=0) connectDevice(device,true) else startScan(false)
+            if(device!=null && attempt%2==1) connectDevice(device,true) else startScan(false)
         },delay)
     }
 

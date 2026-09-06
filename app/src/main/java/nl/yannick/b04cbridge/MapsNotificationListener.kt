@@ -11,9 +11,9 @@ import android.view.ViewGroup
 import android.widget.TextView
 
 class MapsNotificationListener: NotificationListenerService(){
-    private var lastSignature = ""
-    private var lastProgressSignature = ""
-    private var lastKnownTotalDistance: Int? = null
+    private val lastSignature = mutableMapOf<String,String>()
+    private val lastProgressSignature = mutableMapOf<String,String>()
+    private val lastKnownTotalDistance = mutableMapOf<String,Int>()
 
     private data class ProgressMeta(
         val current:Int?,
@@ -30,20 +30,22 @@ class MapsNotificationListener: NotificationListenerService(){
 
     override fun onListenerConnected() {
         super.onListenerConnected()
-        BridgeState.log("Google Maps meldingstoegang actief")
+        BridgeState.log("Google Maps + Komoot meldingstoegang actief")
         runCatching {
             activeNotifications
-                .filter { it.packageName == GMAPS }
+                .filter { isSupported(it.packageName) }
                 .forEach { handle(it) }
         }
     }
 
     override fun onNotificationPosted(sbn: StatusBarNotification){
-        if(sbn.packageName!=GMAPS) return
+        if(!isSupported(sbn.packageName)) return
         handle(sbn)
     }
 
     private fun handle(sbn: StatusBarNotification){
+        val pkg=sbn.packageName
+        val source=sourceName(pkg)
         val lines = LinkedHashSet<String>()
         val e=sbn.notification.extras
 
@@ -63,56 +65,57 @@ class MapsNotificationListener: NotificationListenerService(){
             }
         }
 
-        val progress=inspectProgressExtras(e)
+        val progress=inspectProgressExtras(source,e)
 
         runCatching {
-            val mapsCtx=createPackageContext(sbn.packageName,Context.CONTEXT_IGNORE_SECURITY)
+            val appCtx=createPackageContext(pkg,Context.CONTEXT_IGNORE_SECURITY)
             val builder=Notification.Builder.recoverBuilder(this,sbn.notification)
             val remote=builder.createBigContentView() ?: builder.createContentView()
             if(remote!=null){
-                val inflater=mapsCtx.getSystemService(Context.LAYOUT_INFLATER_SERVICE) as LayoutInflater
+                val inflater=appCtx.getSystemService(Context.LAYOUT_INFLATER_SERVICE) as LayoutInflater
                 val root=inflater.inflate(remote.layoutId,null) as? ViewGroup
                 if(root!=null){
-                    remote.reapply(mapsCtx,root)
+                    remote.reapply(appCtx,root)
                     collectText(root,lines)
                 }
             }
-        }.onFailure { BridgeState.log("Maps RemoteViews lezen mislukt: ${it.javaClass.simpleName}") }
+        }.onFailure { BridgeState.log("$source RemoteViews lezen mislukt: ${it.javaClass.simpleName}") }
 
         if(lines.isEmpty()) return
         val cleanLines=lines.filter { it.isNotBlank() }
         val signature=cleanLines.joinToString(" | ")
-        if(signature!=lastSignature){
-            lastSignature=signature
-            BridgeState.log("MAPS: $signature")
+        if(signature!=lastSignature[pkg]){
+            lastSignature[pkg]=signature
+            BridgeState.log("$source: $signature")
         }
 
         val distances = findDistances(cleanLines)
         val currentDistance = chooseCurrentDistance(cleanLines,distances) ?: 0
 
-        // On the user's Android 16 Google Maps build, ProgressStyle is expressed in meters:
-        // e.g. current=2, max=1581 while Maps itself shows 1.6 km remaining.
-        // Prefer that live value over text fields, which may contain stale/zero distances.
-        val progressRemaining=progress.remainingMeters()
-        if(progressRemaining!=null && progressRemaining>=0){
-            lastKnownTotalDistance=progressRemaining
+        if(pkg==GMAPS){
+            val progressRemaining=progress.remainingMeters()
+            if(progressRemaining!=null && progressRemaining>=0){
+                lastKnownTotalDistance[pkg]=progressRemaining
+            } else {
+                chooseRemainingDistance(cleanLines,distances)?.let { lastKnownTotalDistance[pkg]=it }
+            }
         } else {
-            chooseRemainingDistance(cleanLines,distances)?.let { lastKnownTotalDistance=it }
+            chooseRemainingDistance(cleanLines,distances)?.let { lastKnownTotalDistance[pkg]=it }
         }
 
-        val totalDistance = lastKnownTotalDistance ?: 0
+        val totalDistance = lastKnownTotalDistance[pkg] ?: 0
         val maneuver=parseManeuver(cleanLines) ?: Protocol.STRAIGHT
 
         val ble=BridgeState.ble
         if(ble?.ready==true){
-            BridgeState.log("Maps -> display: ${maneuverName(maneuver)}, nu ${currentDistance}m, resterend ${totalDistance}m")
+            BridgeState.log("$source -> display: ${maneuverName(maneuver)}, nu ${currentDistance}m, resterend ${totalDistance}m")
             ble.sendMapsNav(maneuver,currentDistance,totalDistance)
         } else {
-            BridgeState.log("Maps ontvangen, maar B04C is niet klaar")
+            BridgeState.log("$source ontvangen, maar B04C is niet klaar")
         }
     }
 
-    private fun inspectProgressExtras(e:Bundle):ProgressMeta{
+    private fun inspectProgressExtras(source:String,e:Bundle):ProgressMeta{
         val current = numberValue(e.get("android.progress"))
         val max = numberValue(e.get("android.progressMax"))
         val indeterminate = e.get("android.progressIndeterminate")
@@ -132,9 +135,11 @@ class MapsNotificationListener: NotificationListenerService(){
             .take(12)
 
         val sig="current=$current max=$max ind=$indeterminate seg=$segmentLengths sum=$segmentSum points=$pointPositions nums=$interestingNumbers"
-        if(sig!=lastProgressSignature){
-            lastProgressSignature=sig
-            BridgeState.log("PROGRESS: $sig")
+        if(sig!=lastProgressSignature[source]){
+            lastProgressSignature[source]=sig
+            if(current!=null || max!=null || segmentLengths.isNotEmpty() || pointPositions.isNotEmpty()){
+                BridgeState.log("${source}_PROGRESS: $sig")
+            }
         }
         return ProgressMeta(current,max,segmentLengths,pointPositions)
     }
@@ -165,7 +170,7 @@ class MapsNotificationListener: NotificationListenerService(){
 
     private fun addLine(lines:MutableSet<String>,cs:CharSequence?){
         val s=cs?.toString()?.trim().orEmpty()
-        if(s.isNotEmpty() && !s.equals("Google Maps",true) && !s.equals("Maps",true)) lines.add(s)
+        if(s.isNotEmpty() && !s.equals("Google Maps",true) && !s.equals("Maps",true) && !s.equals("Komoot",true)) lines.add(s)
     }
 
     private fun parseManeuver(lines:List<String>):Int?{
@@ -173,17 +178,19 @@ class MapsNotificationListener: NotificationListenerService(){
             val t=line.lowercase().trim()
             if(isMetadataLine(t)) continue
             when {
-                "u-turn" in t || "u turn" in t || "keer om" in t || "omkeren" in t -> return Protocol.UTURN
-                "flauw links" in t || "lichte bocht links" in t || "slight left" in t || "houd links" in t -> return Protocol.SLIGHT_LEFT
-                "flauw rechts" in t || "lichte bocht rechts" in t || "slight right" in t || "houd rechts" in t -> return Protocol.SLIGHT_RIGHT
-                "scherp links" in t || "sharp left" in t -> return Protocol.SHARP_LEFT
-                "scherp rechts" in t || "sharp right" in t -> return Protocol.SHARP_RIGHT
-                "linksaf" in t || "sla links" in t || "turn left" in t || " left onto " in t -> return Protocol.LEFT
-                "rechtsaf" in t || "sla rechts" in t || "turn right" in t || " right onto " in t -> return Protocol.RIGHT
+                "u-turn" in t || "u turn" in t || "keer om" in t || "omkeren" in t || "wenden" in t -> return Protocol.UTURN
+                "flauw links" in t || "lichte bocht links" in t || "slight left" in t || "houd links" in t || "leicht links" in t -> return Protocol.SLIGHT_LEFT
+                "flauw rechts" in t || "lichte bocht rechts" in t || "slight right" in t || "houd rechts" in t || "leicht rechts" in t -> return Protocol.SLIGHT_RIGHT
+                "scherp links" in t || "sharp left" in t || "scharf links" in t -> return Protocol.SHARP_LEFT
+                "scherp rechts" in t || "sharp right" in t || "scharf rechts" in t -> return Protocol.SHARP_RIGHT
+                "linksaf" in t || "sla links" in t || "turn left" in t || " left onto " in t || "links abbiegen" in t -> return Protocol.LEFT
+                "rechtsaf" in t || "sla rechts" in t || "turn right" in t || " right onto " in t || "rechts abbiegen" in t -> return Protocol.RIGHT
                 "bestemming bereikt" in t || "je bent aangekomen" in t || "aangekomen bij" in t ||
-                    "destination reached" in t || "you have arrived" in t || "arrived at" in t -> return Protocol.ARRIVE
+                    "destination reached" in t || "you have arrived" in t || "arrived at" in t ||
+                    "ziel erreicht" in t || "ziel angekommen" in t -> return Protocol.ARRIVE
                 "rechtdoor" in t || "ga verder" in t || "continue" in t || "straight" in t ||
-                    "volg" in t || "fiets naar" in t || "rij naar" in t || "head " in t -> return Protocol.STRAIGHT
+                    "volg" in t || "fiets naar" in t || "rij naar" in t || "head " in t ||
+                    "geradeaus" in t || "weiter auf" in t -> return Protocol.STRAIGHT
             }
         }
         return null
@@ -191,8 +198,8 @@ class MapsNotificationListener: NotificationListenerService(){
 
     private fun isMetadataLine(t:String):Boolean{
         if(t.isBlank() || t=="•" || t=="·") return true
-        if("navigatie afsluiten" in t || "stop navigation" in t) return true
-        if("aankomst om" in t || "arrival at" in t || "arrive at" in t) return true
+        if("navigatie afsluiten" in t || "stop navigation" in t || "navigation beenden" in t) return true
+        if("aankomst om" in t || "arrival at" in t || "arrive at" in t || "ankunft" in t) return true
         if(Regex("^\\d{1,2}[:.]\\d{2}$").matches(t)) return true
         return false
     }
@@ -223,7 +230,7 @@ class MapsNotificationListener: NotificationListenerService(){
     private fun chooseRemainingDistance(lines:List<String>, distances:List<Int>):Int?{
         val tripLine=lines.firstOrNull { line ->
             val t=line.lowercase()
-            ("min" in t || "uur" in t || "hr" in t || Regex("\\b\\d{1,2}[:.]\\d{2}\\b").containsMatchIn(t)) &&
+            ("min" in t || "uur" in t || "hr" in t || "std" in t || Regex("\\b\\d{1,2}[:.]\\d{2}\\b").containsMatchIn(t)) &&
                 Regex("\\d+(?:[.,]\\d+)?\\s*(km|m)\\b",RegexOption.IGNORE_CASE).containsMatchIn(line)
         }
         if(tripLine!=null){
@@ -238,5 +245,11 @@ class MapsNotificationListener: NotificationListenerService(){
         Protocol.UTURN->"omkeren"; Protocol.ARRIVE->"aankomst"; else->"rechtdoor"
     }
 
-    companion object { const val GMAPS="com.google.android.apps.maps" }
+    private fun isSupported(pkg:String)=pkg==GMAPS || pkg==KOMOOT
+    private fun sourceName(pkg:String)=if(pkg==KOMOOT) "KOMOOT" else "MAPS"
+
+    companion object {
+        const val GMAPS="com.google.android.apps.maps"
+        const val KOMOOT="de.komoot.android"
+    }
 }

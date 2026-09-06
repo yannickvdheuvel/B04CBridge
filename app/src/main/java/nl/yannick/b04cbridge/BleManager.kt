@@ -43,6 +43,11 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
     // Zoveel snelle pogingen (samen ruim een minuut) voordat we het aan Android overlaten.
     private val SNELLE_POGINGEN = 6
 
+    // Zoveel mislukte schrijfpogingen achter elkaar (ruim drie seconden) voordat we de
+    // verbinding als dood beschouwen.
+    private val TX_POGINGEN = 14
+    private var txFailures = 0
+
     // Het adres van het display onthouden we over herstarts heen. Uit het bugreport van de
     // originele BIKEGO-app bleek dat Android de ACL-link zelf alweer opzet terwijl de GATT-client
     // van de app allang weg is. Het display adverteert dan niet meer, dus een scan vindt hem
@@ -373,16 +378,53 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
         }catch(e:Exception){log("AES fout: ${e.message}")}
     }
 
-    @Synchronized fun write(bytes:ByteArray){ txQueue.addLast(bytes.copyOf()); sendNext() }
+    @Synchronized fun write(bytes:ByteArray){
+        // Lukt schrijven even niet, dan hoopt de wachtrij zich op met verouderde aanwijzingen.
+        // Alleen de nieuwste is nog interessant, dus de oudste gaan eruit.
+        while(txQueue.size>=8) txQueue.removeFirst()
+        txQueue.addLast(bytes.copyOf())
+        sendNext()
+    }
 
     @SuppressLint("MissingPermission") @Synchronized private fun sendNext(){
         if(writeBusy || txQueue.isEmpty()) return
         val c=writeChar ?: run{ log("Niet verbonden"); txQueue.clear(); return }
         val bytes=txQueue.removeFirst(); c.writeType=BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT; c.value=bytes; writeBusy=true
         val ok=gatt?.writeCharacteristic(c) ?: false
-        if(!ok){
-            writeBusy=false; txQueue.addFirst(bytes); log("BLE bezet; TX opnieuw proberen..."); handler.postDelayed({ sendNext() },250)
-        } else log("TX "+bytes.joinToString(" "){"%02X".format(it)})
+        if(ok){
+            txFailures=0
+            log("TX "+bytes.joinToString(" "){"%02X".format(it)})
+            return
+        }
+
+        // Een enkele mislukte schrijfpoging betekent dat de stack even bezet is; dat gaat vanzelf
+        // over. Blijft het mislukken, dan is de verbinding in werkelijkheid dood terwijl wij hem
+        // nog als bruikbaar beschouwen. Dat gebeurde echt: honderden regels "BLE bezet" achter
+        // elkaar, en omdat ready nog true was startte er ook nooit een herverbinding.
+        writeBusy=false
+        txQueue.addFirst(bytes)
+        txFailures++
+        if(txFailures==1) log("BLE bezet; TX opnieuw proberen...")
+        if(txFailures>=TX_POGINGEN){
+            forceReconnect("Schrijven lukt $txFailures keer niet; verbinding is dood, opnieuw verbinden")
+            return
+        }
+        handler.postDelayed({ sendNext() },250)
+    }
+
+    @SuppressLint("MissingPermission")
+    @Synchronized private fun forceReconnect(reason:String){
+        log(reason)
+        txFailures=0
+        val dead=gatt
+        gatt=null
+        if(autoConnectGatt===dead) autoConnectGatt=null
+        connecting=false
+        resetSessionState()
+        runCatching { dead?.disconnect() }
+        runCatching { dead?.close() }
+        reconnectAttempt=0
+        scheduleReconnect()
     }
 
     // Het B04C toont de tweede manoeuvre echt: op de laptop-rig gaf nav(350,links,1200,rechts,...)

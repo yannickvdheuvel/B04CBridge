@@ -201,7 +201,15 @@ class MapsNotificationListener: NotificationListenerService(){
         val sig="current=$current max=$max ind=$indeterminate seg=$segmentLengths sum=$segmentSum points=$pointPositions nums=$interestingNumbers"
         if(sig!=lastProgressSignature[source]){
             lastProgressSignature[source]=sig
-            if(current!=null || max!=null || segmentLengths.isNotEmpty() || pointPositions.isNotEmpty()) BridgeState.log("${source}_PROGRESS: $sig")
+            if(current!=null || max!=null || segmentLengths.isNotEmpty() || pointPositions.isNotEmpty()){
+                BridgeState.log("${source}_PROGRESS: $sig")
+                // De punten op de voortgangsbalk zouden de afslagen kunnen zijn. Zijn ze dat,
+                // dan levert dit niet alleen de volgende manoeuvre maar ook de afstand ernaartoe,
+                // en kan de tweede pijl op het B04C echt gevuld worden. We kennen alleen "length"
+                // en "position"; daarom hier de volledige inhoud, zodat één rit uitsluitsel geeft.
+                segments.take(4).forEachIndexed { i,b -> BridgeState.log("${source}_SEG[$i]: ${dumpBundle(b)}") }
+                points.take(6).forEachIndexed { i,b -> BridgeState.log("${source}_POINT[$i]: ${dumpBundle(b)}") }
+            }
         }
         return ProgressMeta(current,max,segmentLengths,pointPositions)
     }
@@ -284,6 +292,17 @@ class MapsNotificationListener: NotificationListenerService(){
             else -> null
         }
     }
+
+    private fun dumpBundle(b:Bundle):String =
+        b.keySet().joinToString(", ") { k ->
+            val v=runCatching { b.get(k) }.getOrNull()
+            "$k=" + when(v){
+                null -> "null"
+                is CharSequence -> "\"$v\""
+                is Bundle -> "{${dumpBundle(v)}}"
+                else -> v.toString().take(60)
+            }
+        }
 
     private fun numberValue(v:Any?):Int?=when(v){
         is Int->v; is Long->v.coerceIn(Int.MIN_VALUE.toLong(),Int.MAX_VALUE.toLong()).toInt(); is Short->v.toInt(); is Byte->v.toInt(); is Float->v.toInt(); is Double->v.toInt(); else->null

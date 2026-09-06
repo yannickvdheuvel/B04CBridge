@@ -20,6 +20,7 @@ class MapsNotificationListener: NotificationListenerService(){
     private val lastKnownTotalDistance = mutableMapOf<String,Int>()
     private val suppressedSent = mutableMapOf<String,String>()
     private val lastSent = mutableMapOf<String,String>()
+    private val unknownReported = mutableMapOf<String,String>()
 
     private data class ProgressMeta(
         val current:Int?,
@@ -159,6 +160,18 @@ class MapsNotificationListener: NotificationListenerService(){
             textManeuver!=null -> "tekst"
             iconManeuver!=null -> "icoon"
             else -> "fallback"
+        }
+
+        // Valt hij op rechtdoor terug, dan kennen we deze instructie niet -- niet uit de tekst
+        // en niet uit het icoon. Dat is precies hoe "Keer hier om" een rit lang onopgemerkt als
+        // rechtdoor op het stuur stond. Daarom hier expliciet melden met de zin en de
+        // vingerafdruk erbij, zodat één blik in de log genoeg is om het gat te dichten.
+        if(textManeuver==null && iconManeuver==null){
+            val hint=cleanLines.firstOrNull { !isMetadataLine(it.lowercase()) && !it.startsWith("android.") && !it.startsWith("androidx.") }.orEmpty()
+            if(hint.isNotBlank() && unknownReported[pkg]!=hint){
+                unknownReported[pkg]=hint
+                BridgeState.log("$source ONBEKENDE MANOEUVRE: \"$hint\" -> rechtdoor | iconen: ${lastIconSignature[source] ?: "-"}")
+            }
         }
 
         if(ble?.ready==true){

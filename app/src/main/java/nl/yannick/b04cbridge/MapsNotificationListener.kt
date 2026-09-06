@@ -113,6 +113,22 @@ class MapsNotificationListener: NotificationListenerService(){
             suppressedSent.remove(pkg)
         }
 
+        if(pkg==GMAPS){
+            // Tijdens herberekenen of wachten op GPS bevat de melding geen instructie meer.
+            // Die viel daardoor terug op rechtdoor met 0 meter, en zo verdween midden in de rit
+            // de pijl van het stuur -- drie keer tijdens een ritje van tien minuten. Beter is
+            // de laatste aanwijzing laten staan tot Maps weer iets zinnigs zegt.
+            val transient=mapsTransientReason(cleanLines)
+            if(transient!=null){
+                if(suppressedSent[pkg]!=transient){
+                    suppressedSent[pkg]=transient
+                    BridgeState.log("MAPS $transient -> laatste aanwijzing blijft staan")
+                }
+                return
+            }
+            suppressedSent.remove(pkg)
+        }
+
         val distances=findDistances(cleanLines)
         val currentDistance=chooseCurrentDistance(cleanLines,distances) ?: 0
 
@@ -251,14 +267,25 @@ class MapsNotificationListener: NotificationListenerService(){
                     details.add("res=${resourceName ?: "$resPkg:0x${resId.toString(16)}"}")
                 }
             }
-            iconFingerprint(value)?.let { details.add("fp=$it") }
+            val fp=iconFingerprint(value)
+            if(fp!=null) details.add("fp=$fp")
             val raw=listOfNotNull(resourceName,value.toString()).joinToString(" ")
-            return "$label{${details.joinToString(",")}}" to parseManeuverFromIconText(raw)
+            return "$label{${details.joinToString(",")}}" to (parseManeuverFromIconText(raw) ?: ICON_FINGERPRINTS[fp])
         }
         if(value is Bitmap) return "$label{bitmap=${value.width}x${value.height},fp=${bitmapFingerprint(value)}}" to null
         val raw=value.toString()
         return "$label{${value.javaClass.simpleName}:${raw.take(100)}}" to parseManeuverFromIconText(raw)
     }
+
+    // Vingerafdrukken van het grote meldingsicoon van Google Maps, afgelezen tijdens een echte
+    // rit: rechtsaf en linksaf zijn elkaars spiegelbeeld, en de derde hoort bij "fiets naar het
+    // oosten op ...". Dit werkt taalonafhankelijk en vangt instructies op die de tekstparser
+    // niet kent. Alleen als terugval gebruikt; de tekst blijft leidend.
+    private val ICON_FINGERPRINTS = mapOf(
+        "00030373ff7c3000" to Protocol.RIGHT,
+        "00c0c0ceff3e0c00" to Protocol.LEFT,
+        "001818183c3c1800" to Protocol.STRAIGHT
+    )
 
     private fun iconFingerprint(icon:Icon):String?=runCatching{
         val d=icon.loadDrawable(this) ?: return@runCatching null
@@ -322,6 +349,19 @@ class MapsNotificationListener: NotificationListenerService(){
     private fun addLine(lines:MutableSet<String>,cs:CharSequence?){
         val s=cs?.toString()?.trim().orEmpty()
         if(s.isNotEmpty() && !s.equals("Google Maps",true) && !s.equals("Maps",true) && !s.equals("Komoot",true)) lines.add(s)
+    }
+
+    private fun mapsTransientReason(lines:List<String>):String?{
+        val text=lines.joinToString(" ").lowercase()
+        return when {
+            "route wordt gewijzigd" in text || "rerouting" in text || "route wordt herberekend" in text ||
+                "recalculating" in text || "neuberechnung" in text -> "route wordt herberekend"
+            "wachten op locatie" in text || "waiting for location" in text ||
+                "warte auf" in text || "gps zoeken" in text -> "wacht op locatie"
+            "navigatie starten" in text || "starting navigation" in text ||
+                "navigation starten" in text -> "navigatie start nog"
+            else -> null
+        }
     }
 
     private fun komootSuppressReason(lines:List<String>):String?{

@@ -98,6 +98,12 @@ Getest met `nav 350 2 1200 3 2500 1 5000`:
 
 Afstanden worden altijd in kilometers met één decimaal getoond; 90 m leest dus als "0.1 km".
 
+Die tweede pijl blijft voorlopig leeg, en dat ligt niet aan het display. Een echte rit met
+Google Maps op Android 16 laat zien dat de melding de volgende manoeuvre niet bevat: de
+`ProgressStyle` heeft in élke meting `points=[]` en precies twee segmenten (afgelegd en
+resterend), en er staat nergens een "daarna"-regel in de tekst. Google Maps publiceert die
+informatie simpelweg niet. Komoot is nog niet op dit punt onderzocht.
+
 ### Manoeuvrecodes
 
 Codes 1 t/m 20 zijn stuk voor stuk naar het display gestuurd en van het scherm afgelezen.

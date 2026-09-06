@@ -34,23 +34,16 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
     private var connecting = false
     private var reconnectScheduled = false
     private var reconnectAttempt = 0
+    private var lastTelemetryLogAt = 0L
     var ready = false; private set
 
-    init {
-        log("B04C Bridge BLE code r21-auto-reconnect")
-    }
+    init { log("B04C Bridge BLE code r22-auto-reconnect+telemetry") }
 
     private fun hasPerm() = Build.VERSION.SDK_INT < 31 || ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT)==PackageManager.PERMISSION_GRANTED
     private fun hasScanPerm() = Build.VERSION.SDK_INT < 31 || ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN)==PackageManager.PERMISSION_GRANTED
 
     private fun resetSessionState(){
-        ready=false
-        challenge=null
-        awaitingAuthReply=false
-        writeBusy=false
-        txQueue.clear()
-        writeChar=null
-        notifyChar=null
+        ready=false; challenge=null; awaitingAuthReply=false; writeBusy=false; txQueue.clear(); writeChar=null; notifyChar=null
     }
 
     @SuppressLint("MissingPermission")
@@ -63,9 +56,7 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
     @SuppressLint("MissingPermission")
     fun scanAndConnect() {
         if (!hasPerm() || !hasScanPerm()) { log("Bluetooth-toestemming ontbreekt"); return }
-        connectionWanted=true
-        reconnectAttempt=0
-        reconnectScheduled=false
+        connectionWanted=true; reconnectAttempt=0; reconnectScheduled=false
         startScan(manual=true)
     }
 
@@ -73,18 +64,11 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
     private fun startScan(manual:Boolean=false){
         if(!connectionWanted || ready || connecting) return
         if (!hasPerm() || !hasScanPerm()) { log("Bluetooth-toestemming ontbreekt"); return }
-
-        stopActiveScan()
-        resetSessionState()
+        stopActiveScan(); resetSessionState()
         try { gatt?.close() } catch(_:Exception) {}
         gatt=null
-
         log(if(manual) "Scannen naar B04C..." else "Auto-reconnect: scannen naar B04C...")
-        val scanner=adapter.bluetoothLeScanner ?: run {
-            log("BLE scanner niet beschikbaar")
-            scheduleReconnect()
-            return
-        }
+        val scanner=adapter.bluetoothLeScanner ?: run { log("BLE scanner niet beschikbaar"); scheduleReconnect(); return }
 
         lateinit var cb: ScanCallback
         cb=object: ScanCallback(){
@@ -95,7 +79,7 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
                     runCatching { scanner.stopScan(this) }
                     lastDevice=result.device
                     log("Gevonden: $n, verbinden...")
-                    connectDevice(result.device, false)
+                    connectDevice(result.device,false)
                 }
             }
             override fun onScanFailed(errorCode:Int){
@@ -105,45 +89,30 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
             }
         }
         activeScan=cb
-        scanner.startScan(listOf(ScanFilter.Builder().setDeviceName("B04C-BF").build()), ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(), cb)
-
+        scanner.startScan(listOf(ScanFilter.Builder().setDeviceName("B04C-BF").build()),ScanSettings.Builder().setScanMode(ScanSettings.SCAN_MODE_LOW_LATENCY).build(),cb)
         handler.postDelayed({
             if(activeScan===cb){
                 activeScan=null
                 runCatching { scanner.stopScan(cb) }
-                if(connectionWanted && !ready && !connecting){
-                    log("B04C niet gevonden; automatisch opnieuw proberen")
-                    scheduleReconnect()
-                }
+                if(connectionWanted && !ready && !connecting){ log("B04C niet gevonden; automatisch opnieuw proberen"); scheduleReconnect() }
             }
         },12000)
     }
 
     @SuppressLint("MissingPermission")
-    private fun connectDevice(device:BluetoothDevice, reconnect:Boolean){
-        if(!connectionWanted || ready || connecting) return
-        if(!hasPerm()) return
-        stopActiveScan()
-        resetSessionState()
-        connecting=true
+    private fun connectDevice(device:BluetoothDevice,reconnect:Boolean){
+        if(!connectionWanted || ready || connecting || !hasPerm()) return
+        stopActiveScan(); resetSessionState(); connecting=true
         if(reconnect) log("Auto-reconnect: direct opnieuw verbinden...")
-
-        val newGatt=runCatching {
-            device.connectGatt(context,false,gattCb,BluetoothDevice.TRANSPORT_LE)
-        }.getOrElse {
-            connecting=false
-            log("Verbinden mislukt: ${it.message}")
-            scheduleReconnect()
-            return
+        val newGatt=runCatching { device.connectGatt(context,false,gattCb,BluetoothDevice.TRANSPORT_LE) }.getOrElse {
+            connecting=false; log("Verbinden mislukt: ${it.message}"); scheduleReconnect(); return
         }
         gatt=newGatt
-
         handler.postDelayed({
             if(connectionWanted && connecting && !ready && gatt===newGatt){
                 log("Verbinding duurt te lang; opnieuw proberen...")
                 connecting=false
-                runCatching { newGatt.disconnect() }
-                runCatching { newGatt.close() }
+                runCatching { newGatt.disconnect() }; runCatching { newGatt.close() }
                 if(gatt===newGatt) gatt=null
                 scheduleReconnect()
             }
@@ -161,8 +130,7 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
             reconnectScheduled=false
             if(!connectionWanted || ready || connecting) return@postDelayed
             val device=lastDevice
-            if(device!=null && attempt<=2) connectDevice(device,true)
-            else startScan(false)
+            if(device!=null && attempt<=2) connectDevice(device,true) else startScan(false)
         },delay)
     }
 
@@ -170,22 +138,17 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
         @SuppressLint("MissingPermission") override fun onConnectionStateChange(g:BluetoothGatt,status:Int,newState:Int){
             if(newState==BluetoothProfile.STATE_CONNECTED){
                 if(gatt!==g){ runCatching { g.close() }; return }
-                connecting=false
-                reconnectScheduled=false
-                reconnectAttempt=0
-                log("GATT verbonden; MTU aanvragen...")
-                g.requestMtu(64)
+                connecting=false; reconnectScheduled=false; reconnectAttempt=0
+                log("GATT verbonden; MTU aanvragen..."); g.requestMtu(64)
             } else if(newState==BluetoothProfile.STATE_DISCONNECTED) {
                 val current=(gatt===g)
                 if(current) gatt=null
-                connecting=false
-                resetSessionState()
-                runCatching { g.close() }
+                connecting=false; resetSessionState(); runCatching { g.close() }
                 log("Verbinding weg (status $status)")
                 if(current) scheduleReconnect()
             }
         }
-        @SuppressLint("MissingPermission") override fun onMtuChanged(g:BluetoothGatt, mtu:Int,status:Int){ log("MTU=$mtu"); g.discoverServices() }
+        @SuppressLint("MissingPermission") override fun onMtuChanged(g:BluetoothGatt,mtu:Int,status:Int){ log("MTU=$mtu"); g.discoverServices() }
         @SuppressLint("MissingPermission") override fun onServicesDiscovered(g:BluetoothGatt,status:Int){
             val s=g.getService(UUID.fromString(Protocol.SERVICE))
             if(s==null){ log("NUS-service niet gevonden. Services: "+g.services.joinToString{it.uuid.toString()}); return }
@@ -205,6 +168,29 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
         }
     }
 
+    private fun u16le(v:ByteArray,i:Int):Int=(v[i].toInt() and 255) or ((v[i+1].toInt() and 255) shl 8)
+    private fun u32le(v:ByteArray,i:Int):Long=(v[i].toLong() and 255) or ((v[i+1].toLong() and 255) shl 8) or ((v[i+2].toLong() and 255) shl 16) or ((v[i+3].toLong() and 255) shl 24)
+
+    private fun decodeTelemetry(v:ByteArray,target:Int,sub:Int,param:Int){
+        // Tijdens de echte rit gecorreleerd met het scherm: 06/01 bevat snelheid, TRIP en ODO.
+        if(target==0x11 && sub==0x06 && param==0x01 && v.size>=28){
+            val speedRaw=u16le(v,16)
+            val tripRaw=u32le(v,18)
+            val odoRaw=u32le(v,22)
+            val speed=speedRaw/100.0
+            val tripMeters=(tripRaw*10L).coerceAtMost(Int.MAX_VALUE.toLong()).toInt()
+            val odoMeters=odoRaw*10L
+            BridgeState.bikeSpeedKph=speed
+            BridgeState.bikeTripMeters=tripMeters
+            BridgeState.bikeOdoMeters=odoMeters
+            val now=System.currentTimeMillis()
+            if(now-lastTelemetryLogAt>=5000){
+                lastTelemetryLogAt=now
+                log("FIETSDATA: %.1f km/h, trip %.2f km, odo %.2f km".format(speed,tripMeters/1000.0,odoMeters/1000.0))
+            }
+        }
+    }
+
     private fun handleRx(v:ByteArray){
         log("RX "+v.joinToString(" "){"%02X".format(it)})
         if(v.size>=8 && v[0]==0x55.toByte() && v[1]==0xAA.toByte()){
@@ -213,20 +199,17 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
             val target=v.getOrNull(4)?.toInt()?.and(255) ?: -1
             val sub=v.getOrNull(5)?.toInt()?.and(255) ?: -1
             val param=v.getOrNull(6)?.toInt()?.and(255) ?: -1
+            decodeTelemetry(v,target,sub,param)
 
             if(direction==0x10 && target==0x11 && sub==0x04 && param==0 && len>=4 && !awaitingAuthReply){
-                val p=v.copyOfRange(7, minOf(11,v.size))
+                val p=v.copyOfRange(7,minOf(11,v.size))
                 if(p.size==4){ challenge=p; awaitingAuthReply=true; log("Challenge ontvangen; authenticeren..."); authenticate(p) }
             } else if(direction==0x10 && target==0x11 && param==0 && awaitingAuthReply) {
                 val reply=v.getOrNull(7)?.toInt()?.and(255) ?: -1
                 if(reply==0){
-                    awaitingAuthReply=false; ready=true
-                    reconnectAttempt=0
-                    log("AUTH OK — display klaar")
-                    write(Protocol.syncTime(System.currentTimeMillis()/1000))
-                } else {
-                    log("Auth-antwoord ontvangen: sub=%02X payload=%02X".format(sub, reply))
-                }
+                    awaitingAuthReply=false; ready=true; reconnectAttempt=0
+                    log("AUTH OK — display klaar"); write(Protocol.syncTime(System.currentTimeMillis()/1000))
+                } else log("Auth-antwoord ontvangen: sub=%02X payload=%02X".format(sub,reply))
             }
         }
     }
@@ -245,28 +228,14 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
     @SuppressLint("MissingPermission") @Synchronized private fun sendNext(){
         if(writeBusy || txQueue.isEmpty()) return
         val c=writeChar ?: run{ log("Niet verbonden"); txQueue.clear(); return }
-        val bytes=txQueue.removeFirst()
-        c.writeType=BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT
-        c.value=bytes
-        writeBusy=true
+        val bytes=txQueue.removeFirst(); c.writeType=BluetoothGattCharacteristic.WRITE_TYPE_DEFAULT; c.value=bytes; writeBusy=true
         val ok=gatt?.writeCharacteristic(c) ?: false
         if(!ok){
-            writeBusy=false
-            txQueue.addFirst(bytes)
-            log("BLE bezet; TX opnieuw proberen...")
-            handler.postDelayed({ sendNext() },250)
+            writeBusy=false; txQueue.addFirst(bytes); log("BLE bezet; TX opnieuw proberen..."); handler.postDelayed({ sendNext() },250)
         } else log("TX "+bytes.joinToString(" "){"%02X".format(it)})
     }
 
-    fun testNav(man:Int,dist:Int=250){
-        if(!ready){ log("Nog niet geauthenticeerd — test niet verstuurd"); return }
-        write(Protocol.nav(dist,man,2500))
-    }
-
-    fun sendMapsNav(man:Int, dist:Int, total:Int){
-        if(!ready){ log("Maps ontvangen, maar B04C is niet klaar"); return }
-        write(Protocol.navDetailed(dist, man, 0, Protocol.STRAIGHT, 0, Protocol.STRAIGHT, total))
-    }
-
-    fun stopNav(){ write(Protocol.stopNav()) }
+    fun testNav(man:Int,dist:Int=250){ if(!ready){ log("Nog niet geauthenticeerd — test niet verstuurd"); return }; write(Protocol.nav(dist,man,2500)) }
+    fun sendMapsNav(man:Int,dist:Int,total:Int){ if(!ready){ log("Navigatie ontvangen, maar B04C is niet klaar"); return }; write(Protocol.navDetailed(dist,man,0,Protocol.STRAIGHT,0,Protocol.STRAIGHT,total)) }
+    fun stopNav(){ if(ready) write(Protocol.stopNav()) }
 }

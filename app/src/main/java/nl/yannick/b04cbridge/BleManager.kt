@@ -385,7 +385,6 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
         } else log("TX "+bytes.joinToString(" "){"%02X".format(it)})
     }
 
-    fun testNav(man:Int,dist:Int=250){ if(!ready){ log("Nog niet geauthenticeerd — test niet verstuurd"); return }; write(Protocol.nav(dist,man,2500)) }
     // Het B04C toont de tweede manoeuvre echt: op de laptop-rig gaf nav(350,links,1200,rechts,...)
     // een grote linkerpijl met 0,3 km en daarboven een kleine rechterpijl met 1,2 km. Het derde
     // slot komt nergens op het scherm terug. Manoeuvrecode 0 is géén bruikbare "onbekend"-waarde:

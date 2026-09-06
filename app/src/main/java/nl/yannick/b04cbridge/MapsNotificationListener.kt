@@ -179,6 +179,10 @@ class MapsNotificationListener: NotificationListenerService(){
             if(lastSent[pkg]!=sentSig){
                 lastSent[pkg]=sentSig
                 BridgeState.log("$source -> display: ${maneuverName(maneuver)}, bocht ${currentDistance}m, route ${totalDistance}m, bron=$directionSource")
+                BridgeState.navManeuver=maneuver
+                BridgeState.navTurnMeters=currentDistance
+                BridgeState.navRouteMeters=totalDistance
+                BridgeState.navAt=System.currentTimeMillis()
                 ble.sendMapsNav(maneuver,currentDistance,totalDistance)
             }
         } else {

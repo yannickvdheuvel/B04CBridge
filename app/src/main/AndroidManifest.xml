@@ -6,7 +6,11 @@
     <uses-permission android:name="android.permission.BLUETOOTH_CONNECT" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
 
-    <application android:theme="@style/Theme.B04CBridge" android:label="B04C Bridge" android:allowBackup="false">
+    <application
+        android:name=".B04CApplication"
+        android:theme="@style/Theme.B04CBridge"
+        android:label="B04C Bridge"
+        android:allowBackup="false">
         <activity android:name=".MainActivity" android:exported="true">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN" />

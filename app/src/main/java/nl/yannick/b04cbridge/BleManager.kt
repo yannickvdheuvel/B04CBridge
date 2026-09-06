@@ -59,6 +59,7 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
 
     private fun resetSessionState(){
         ready=false; challenge=null; awaitingAuthReply=false; writeBusy=false; txQueue.clear(); writeChar=null; notifyChar=null
+        lastRxHex.clear(); repeatCount.clear()
     }
 
     @SuppressLint("MissingPermission")
@@ -192,6 +193,25 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
         }
     }
 
+    // Het display herhaalt zijn telemetrie een paar keer per seconde, ongewijzigd. Die regels
+    // ongefilterd loggen maakt een ritlog onleesbaar: de navigatieregels waar het om gaat
+    // verdwijnen tussen honderden identieke kopieën. Daarom loggen we per frametype alleen
+    // wat er verandert; herhalingen worden geteld en pas bij de eerstvolgende wijziging gemeld.
+    private val lastRxHex = HashMap<String,String>()
+    private val repeatCount = HashMap<String,Int>()
+
+    private fun logRx(v:ByteArray){
+        val hex=v.joinToString(" "){"%02X".format(it)}
+        val key=if(v.size>=8) "%02X/%02X/%02X".format(v[4],v[5],v[6]) else "raw"
+        if(lastRxHex[key]==hex){
+            repeatCount[key]=(repeatCount[key] ?: 0)+1
+            return
+        }
+        val repeats=repeatCount.remove(key) ?: 0
+        lastRxHex[key]=hex
+        log(if(repeats>0) "RX $hex  (vorige $repeats× herhaald)" else "RX $hex")
+    }
+
     private fun u16le(v:ByteArray,i:Int):Int=(v[i].toInt() and 255) or ((v[i+1].toInt() and 255) shl 8)
     private fun u32le(v:ByteArray,i:Int):Long=(v[i].toLong() and 255) or ((v[i+1].toLong() and 255) shl 8) or ((v[i+2].toLong() and 255) shl 16) or ((v[i+3].toLong() and 255) shl 24)
 
@@ -245,7 +265,7 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
     }
 
     private fun handleRx(v:ByteArray){
-        log("RX "+v.joinToString(" "){"%02X".format(it)})
+        logRx(v)
         if(v.size>=8 && v[0]==0x55.toByte() && v[1]==0xAA.toByte()){
             val len=v[2].toInt() and 255
             val direction=v.getOrNull(3)?.toInt()?.and(255) ?: -1

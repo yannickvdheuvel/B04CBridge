@@ -52,7 +52,7 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
     }
     private fun knownDevice(): BluetoothDevice? = lastDevice ?: savedDevice()
 
-    init { log("B04C Bridge BLE code r22-auto-reconnect+telemetry") }
+    init { log("B04C Bridge ${BuildConfig.VERSION_NAME}") }
 
     private fun hasPerm() = Build.VERSION.SDK_INT < 31 || ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_CONNECT)==PackageManager.PERMISSION_GRANTED
     private fun hasScanPerm() = Build.VERSION.SDK_INT < 31 || ContextCompat.checkSelfPermission(context, Manifest.permission.BLUETOOTH_SCAN)==PackageManager.PERMISSION_GRANTED

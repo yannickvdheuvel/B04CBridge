@@ -7,12 +7,21 @@ android {
     namespace = "nl.yannick.b04cbridge"
     compileSdk = 35
 
+    // Het buildnummer van GitHub Actions komt in de versienaam terecht, zodat de app in zijn
+    // eigen log kan zeggen welke build er daadwerkelijk op de telefoon staat. Daarvoor stond
+    // er een handmatig bijgewerkte tekst in BleManager, en die klopte al lang niet meer.
+    val ciBuild: String? = System.getenv("GITHUB_RUN_NUMBER")
+
     defaultConfig {
         applicationId = "nl.yannick.b04cbridge"
         minSdk = 26
         targetSdk = 35
-        versionCode = 1
-        versionName = "0.1-test"
+        versionCode = ciBuild?.toIntOrNull() ?: 1
+        versionName = if (ciBuild != null) "build $ciBuild" else "lokale build"
+    }
+
+    buildFeatures {
+        buildConfig = true
     }
 
     compileOptions {

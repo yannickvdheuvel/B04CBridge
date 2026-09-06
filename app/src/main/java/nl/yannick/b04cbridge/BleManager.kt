@@ -37,7 +37,11 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
     private var lastTelemetryLogAt = 0L
     private var lastStatsLogAt = 0L
     private val prefs = context.getSharedPreferences("b04c", Context.MODE_PRIVATE)
+    private var autoConnectGatt: BluetoothGatt? = null
     var ready = false; private set
+
+    // Zoveel snelle pogingen (samen ruim een minuut) voordat we het aan Android overlaten.
+    private val SNELLE_POGINGEN = 6
 
     // Het adres van het display onthouden we over herstarts heen. Uit het bugreport van de
     // originele BIKEGO-app bleek dat Android de ACL-link zelf alweer opzet terwijl de GATT-client
@@ -73,6 +77,7 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
     fun scanAndConnect() {
         if (!hasPerm() || !hasScanPerm()) { log("Bluetooth-toestemming ontbreekt"); return }
         connectionWanted=true; reconnectAttempt=0; reconnectScheduled=false
+        cancelAutoConnect()
         val known=knownDevice()
         if(known!=null){
             log("Bekend display ${known.address}; direct verbinden...")
@@ -155,8 +160,34 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
             // scannen tot hij weer aangaat. Om en om proberen dekt beide binnen twee pogingen;
             // op een echte uit/aan-test kostte drie-op-een nog twintig seconden.
             val device=knownDevice()
+            if(attempt>=SNELLE_POGINGEN && device!=null){ armAutoConnect(device); return@postDelayed }
             if(device!=null && attempt%2==1) connectDevice(device,true) else startScan(false)
         },delay)
+    }
+
+    // Blijven de snelle pogingen mislukken, dan is doorgaan met kort-op-elkaar proberen zinloos
+    // en soms zelfs contraproductief: status 133 komt juist vaak terug als je te snel opnieuw
+    // begint. Android heeft hier een eigen voorziening voor. Met autoConnect=true meld je de
+    // verbinding eenmalig aan en zet het systeem hem zelf op zodra het apparaat opduikt --
+    // precies wat je wil als het display uren uit staat. Reageert trager bij een korte
+    // onderbreking, dus we gebruiken hem pas nadat de snelle route heeft gefaald.
+    @SuppressLint("MissingPermission")
+    private fun armAutoConnect(device:BluetoothDevice){
+        if(!connectionWanted || ready || autoConnectGatt!=null) return
+        stopActiveScan(); resetSessionState()
+        runCatching { gatt?.close() }; gatt=null
+        val g=runCatching { device.connectGatt(context,true,gattCb,BluetoothDevice.TRANSPORT_LE) }.getOrNull()
+        if(g==null){ log("Aanhoudend verbindingsverzoek mislukt; opnieuw proberen"); reconnectAttempt=0; scheduleReconnect(); return }
+        autoConnectGatt=g; gatt=g; connecting=false
+        log("Aanhoudend verbindingsverzoek geplaatst bij ${device.address}; Android verbindt zodra het display zich meldt")
+    }
+
+    @SuppressLint("MissingPermission")
+    private fun cancelAutoConnect(){
+        val g=autoConnectGatt ?: return
+        autoConnectGatt=null
+        if(gatt===g) gatt=null
+        runCatching { g.disconnect() }; runCatching { g.close() }
     }
 
     private val gattCb=object:BluetoothGattCallback(){
@@ -169,6 +200,9 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
             } else if(newState==BluetoothProfile.STATE_DISCONNECTED) {
                 val current=(gatt===g)
                 if(current) gatt=null
+                // Na een geslaagde verbinding weer met de snelle route beginnen: een korte
+                // onderbreking wil je in seconden herstellen, niet via het trage systeemverzoek.
+                if(autoConnectGatt===g){ autoConnectGatt=null; reconnectAttempt=0 }
                 connecting=false; resetSessionState(); runCatching { g.close() }
                 log("Verbinding weg (status $status)")
                 if(current) scheduleReconnect()

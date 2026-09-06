@@ -1,11 +1,13 @@
 package nl.yannick.b04cbridge
 
 import android.app.Notification
-import android.content.Context
+import android.graphics.Bitmap
+import android.graphics.Canvas
+import android.graphics.drawable.Icon
+import android.os.Build
 import android.os.Bundle
 import android.service.notification.NotificationListenerService
 import android.service.notification.StatusBarNotification
-import android.view.LayoutInflater
 import android.view.View
 import android.view.ViewGroup
 import android.widget.TextView
@@ -13,7 +15,9 @@ import android.widget.TextView
 class MapsNotificationListener: NotificationListenerService(){
     private val lastSignature = mutableMapOf<String,String>()
     private val lastProgressSignature = mutableMapOf<String,String>()
+    private val lastIconSignature = mutableMapOf<String,String>()
     private val lastKnownTotalDistance = mutableMapOf<String,Int>()
+    private val suppressedSent = mutableMapOf<String,String>()
 
     private data class ProgressMeta(
         val current:Int?,
@@ -66,19 +70,14 @@ class MapsNotificationListener: NotificationListenerService(){
         }
 
         val progress=inspectProgressExtras(source,e)
+        val iconManeuver=inspectNavigationIcons(source,pkg,sbn.notification,e)
 
         runCatching {
-            val appCtx=createPackageContext(pkg,Context.CONTEXT_IGNORE_SECURITY)
-            val builder=Notification.Builder.recoverBuilder(this,sbn.notification)
+            val appCtx=createPackageContext(pkg,0)
+            val builder=Notification.Builder.recoverBuilder(appCtx,sbn.notification)
             val remote=builder.createBigContentView() ?: builder.createContentView()
-            if(remote!=null){
-                val inflater=appCtx.getSystemService(Context.LAYOUT_INFLATER_SERVICE) as LayoutInflater
-                val root=inflater.inflate(remote.layoutId,null) as? ViewGroup
-                if(root!=null){
-                    remote.reapply(appCtx,root)
-                    collectText(root,lines)
-                }
-            }
+            val root=remote?.apply(appCtx,null)
+            if(root!=null) collectText(root,lines)
         }.onFailure { BridgeState.log("$source RemoteViews lezen mislukt: ${it.javaClass.simpleName}") }
 
         if(lines.isEmpty()) return
@@ -89,6 +88,25 @@ class MapsNotificationListener: NotificationListenerService(){
             BridgeState.log("$source: $signature")
         }
 
+        val ble=BridgeState.ble
+        if(pkg==KOMOOT){
+            val suppressReason=komootSuppressReason(cleanLines)
+            if(suppressReason!=null){
+                lastKnownTotalDistance.remove(pkg)
+                if(ble?.ready==true){
+                    if(suppressedSent[pkg]!=suppressReason){
+                        suppressedSent[pkg]=suppressReason
+                        ble.stopNav()
+                        BridgeState.log("KOMOOT $suppressReason -> B04C navigatie gepauzeerd")
+                    }
+                } else {
+                    suppressedSent.remove(pkg)
+                }
+                return
+            }
+            suppressedSent.remove(pkg)
+        }
+
         val distances = findDistances(cleanLines)
         val currentDistance = chooseCurrentDistance(cleanLines,distances) ?: 0
 
@@ -97,18 +115,28 @@ class MapsNotificationListener: NotificationListenerService(){
             if(progressRemaining!=null && progressRemaining>=0){
                 lastKnownTotalDistance[pkg]=progressRemaining
             } else {
-                chooseRemainingDistance(cleanLines,distances)?.let { lastKnownTotalDistance[pkg]=it }
+                chooseRemainingDistance(cleanLines,distances,true)?.let { lastKnownTotalDistance[pkg]=it }
             }
         } else {
-            chooseRemainingDistance(cleanLines,distances)?.let { lastKnownTotalDistance[pkg]=it }
+            val komootTotal=chooseRemainingDistance(cleanLines,distances,false)
+            if(komootTotal!=null && komootTotal>currentDistance){
+                lastKnownTotalDistance[pkg]=komootTotal
+            } else {
+                lastKnownTotalDistance.remove(pkg)
+            }
         }
 
         val totalDistance = lastKnownTotalDistance[pkg] ?: 0
-        val maneuver=parseManeuver(cleanLines) ?: Protocol.STRAIGHT
+        val textManeuver=parseManeuver(cleanLines)
+        val maneuver=textManeuver ?: iconManeuver ?: Protocol.STRAIGHT
+        val directionSource=when {
+            textManeuver!=null -> "tekst"
+            iconManeuver!=null -> "icoon"
+            else -> "fallback"
+        }
 
-        val ble=BridgeState.ble
         if(ble?.ready==true){
-            BridgeState.log("$source -> display: ${maneuverName(maneuver)}, nu ${currentDistance}m, resterend ${totalDistance}m")
+            BridgeState.log("$source -> display: ${maneuverName(maneuver)}, nu ${currentDistance}m, resterend ${totalDistance}m, bron=$directionSource")
             ble.sendMapsNav(maneuver,currentDistance,totalDistance)
         } else {
             BridgeState.log("$source ontvangen, maar B04C is niet klaar")
@@ -144,6 +172,108 @@ class MapsNotificationListener: NotificationListenerService(){
         return ProgressMeta(current,max,segmentLengths,pointPositions)
     }
 
+    private fun inspectNavigationIcons(source:String,pkg:String,n:Notification,e:Bundle):Int?{
+        val parts=mutableListOf<String>()
+        var maneuver:Int?=null
+
+        fun probe(label:String,value:Any?,allowDirection:Boolean){
+            if(value==null) return
+            val desc=describeIconValue(label,value,pkg)
+            parts.add(desc.first)
+            if(allowDirection && maneuver==null) maneuver=desc.second
+        }
+
+        probe("tracker",e.get("android.progressTrackerIcon"),true)
+        probe("start",e.get("android.progressStartIcon"),false)
+        probe("end",e.get("android.progressEndIcon"),false)
+        probe("largeExtra",e.get(Notification.EXTRA_LARGE_ICON),true)
+        probe("largeBig",e.get(Notification.EXTRA_LARGE_ICON_BIG),true)
+        probe("large",n.getLargeIcon(),true)
+        probe("small",n.smallIcon,false)
+
+        val sig=parts.joinToString(" | ")
+        if(sig.isNotBlank() && sig!=lastIconSignature[source]){
+            lastIconSignature[source]=sig
+            BridgeState.log("${source}_ICONS: $sig")
+        }
+        return maneuver
+    }
+
+    private fun describeIconValue(label:String,value:Any,pkg:String):Pair<String,Int?>{
+        if(value is Icon){
+            var resourceName:String?=null
+            val details=mutableListOf<String>()
+            if(Build.VERSION.SDK_INT>=28){
+                details.add("type=${value.type}")
+                if(value.type==Icon.TYPE_RESOURCE){
+                    val resPkg=value.resPackage?.takeIf { it.isNotBlank() } ?: pkg
+                    val resId=value.resId
+                    resourceName=runCatching {
+                        packageManager.getResourcesForApplication(resPkg).getResourceName(resId)
+                    }.getOrNull()
+                    details.add("res=${resourceName ?: "$resPkg:0x${resId.toString(16)}"}")
+                }
+            }
+            iconFingerprint(value)?.let { details.add("fp=$it") }
+            if(resourceName==null) details.add("raw=${value.toString().take(100)}")
+            val raw=listOfNotNull(resourceName,value.toString()).joinToString(" ")
+            return "$label{${details.joinToString(",")}}" to parseManeuverFromIconText(raw)
+        }
+        if(value is Bitmap){
+            val fp=bitmapFingerprint(value)
+            return "$label{bitmap=${value.width}x${value.height},fp=$fp}" to null
+        }
+        val raw=value.toString()
+        return "$label{${value.javaClass.simpleName}:${raw.take(100)}}" to parseManeuverFromIconText(raw)
+    }
+
+    private fun iconFingerprint(icon:Icon):String? = runCatching {
+        val d=icon.loadDrawable(this) ?: return@runCatching null
+        val bmp=Bitmap.createBitmap(48,48,Bitmap.Config.ARGB_8888)
+        val canvas=Canvas(bmp)
+        d.setBounds(0,0,48,48)
+        d.draw(canvas)
+        bitmapFingerprint(bmp)
+    }.getOrNull()
+
+    private fun bitmapFingerprint(bitmap:Bitmap):String{
+        val sample=if(bitmap.width==48 && bitmap.height==48) bitmap else {
+            Bitmap.createScaledBitmap(bitmap,48,48,true)
+        }
+        var bits=0L
+        for(gy in 0 until 8){
+            for(gx in 0 until 8){
+                var active=0
+                for(y in gy*6 until gy*6+6){
+                    for(x in gx*6 until gx*6+6){
+                        if((sample.getPixel(x,y) ushr 24) and 0xFF > 40) active++
+                    }
+                }
+                if(active>=4){
+                    val bit=gy*8+gx
+                    bits=bits or (1L shl bit)
+                }
+            }
+        }
+        return java.lang.Long.toUnsignedString(bits,16).padStart(16,'0')
+    }
+
+    private fun parseManeuverFromIconText(raw:String):Int?{
+        val t=raw.lowercase().replace('-','_').replace(' ','_')
+        return when {
+            "u_turn" in t || "uturn" in t || "turnaround" in t -> Protocol.UTURN
+            ("slight" in t || "keep" in t) && ("left" in t || "links" in t) -> Protocol.SLIGHT_LEFT
+            ("slight" in t || "keep" in t) && ("right" in t || "rechts" in t) -> Protocol.SLIGHT_RIGHT
+            "sharp" in t && ("left" in t || "links" in t) -> Protocol.SHARP_LEFT
+            "sharp" in t && ("right" in t || "rechts" in t) -> Protocol.SHARP_RIGHT
+            "left" in t || "links" in t -> Protocol.LEFT
+            "right" in t || "rechts" in t -> Protocol.RIGHT
+            "arrive" in t || "destination" in t || "finish" in t -> Protocol.ARRIVE
+            "straight" in t || "ahead" in t -> Protocol.STRAIGHT
+            else -> null
+        }
+    }
+
     private fun numberValue(v:Any?):Int? = when(v){
         is Int -> v
         is Long -> v.coerceIn(Int.MIN_VALUE.toLong(),Int.MAX_VALUE.toLong()).toInt()
@@ -173,18 +303,27 @@ class MapsNotificationListener: NotificationListenerService(){
         if(s.isNotEmpty() && !s.equals("Google Maps",true) && !s.equals("Maps",true) && !s.equals("Komoot",true)) lines.add(s)
     }
 
+    private fun komootSuppressReason(lines:List<String>):String?{
+        val text=lines.joinToString(" ").lowercase()
+        return when {
+            "buiten de route" in text || "off route" in text || "off-route" in text || "outside the route" in text || "außerhalb der route" in text -> "buiten route"
+            "naar het startpunt" in text || "to the start point" in text || "to the starting point" in text || "zum startpunkt" in text -> "naar startpunt"
+            else -> null
+        }
+    }
+
     private fun parseManeuver(lines:List<String>):Int?{
         for(line in lines){
             val t=line.lowercase().trim()
             if(isMetadataLine(t)) continue
             when {
                 "u-turn" in t || "u turn" in t || "keer om" in t || "omkeren" in t || "wenden" in t -> return Protocol.UTURN
-                "flauw links" in t || "lichte bocht links" in t || "slight left" in t || "houd links" in t || "leicht links" in t -> return Protocol.SLIGHT_LEFT
-                "flauw rechts" in t || "lichte bocht rechts" in t || "slight right" in t || "houd rechts" in t || "leicht rechts" in t -> return Protocol.SLIGHT_RIGHT
+                "flauw links" in t || "lichte bocht links" in t || "slight left" in t || "houd links" in t || "keep left" in t || "leicht links" in t -> return Protocol.SLIGHT_LEFT
+                "flauw rechts" in t || "lichte bocht rechts" in t || "slight right" in t || "houd rechts" in t || "keep right" in t || "leicht rechts" in t -> return Protocol.SLIGHT_RIGHT
                 "scherp links" in t || "sharp left" in t || "scharf links" in t -> return Protocol.SHARP_LEFT
                 "scherp rechts" in t || "sharp right" in t || "scharf rechts" in t -> return Protocol.SHARP_RIGHT
-                "linksaf" in t || "sla links" in t || "turn left" in t || " left onto " in t || "links abbiegen" in t -> return Protocol.LEFT
-                "rechtsaf" in t || "sla rechts" in t || "turn right" in t || " right onto " in t || "rechts abbiegen" in t -> return Protocol.RIGHT
+                "linksaf" in t || "sla links" in t || "ga links" in t || "neem links" in t || "bocht naar links" in t || "turn left" in t || " left onto " in t || "links abbiegen" in t -> return Protocol.LEFT
+                "rechtsaf" in t || "sla rechts" in t || "ga rechts" in t || "neem rechts" in t || "bocht naar rechts" in t || "turn right" in t || " right onto " in t || "rechts abbiegen" in t -> return Protocol.RIGHT
                 "bestemming bereikt" in t || "je bent aangekomen" in t || "aangekomen bij" in t ||
                     "destination reached" in t || "you have arrived" in t || "arrived at" in t ||
                     "ziel erreicht" in t || "ziel angekommen" in t -> return Protocol.ARRIVE
@@ -214,7 +353,7 @@ class MapsNotificationListener: NotificationListenerService(){
                 if(meters>=0) out.add(meters)
             }
         }
-        return out
+        return out.distinct()
     }
 
     private fun chooseCurrentDistance(lines:List<String>, distances:List<Int>):Int?{
@@ -227,7 +366,7 @@ class MapsNotificationListener: NotificationListenerService(){
         return distances.minOrNull()
     }
 
-    private fun chooseRemainingDistance(lines:List<String>, distances:List<Int>):Int?{
+    private fun chooseRemainingDistance(lines:List<String>, distances:List<Int>, allowMaxFallback:Boolean):Int?{
         val tripLine=lines.firstOrNull { line ->
             val t=line.lowercase()
             ("min" in t || "uur" in t || "hr" in t || "std" in t || Regex("\\b\\d{1,2}[:.]\\d{2}\\b").containsMatchIn(t)) &&
@@ -236,7 +375,7 @@ class MapsNotificationListener: NotificationListenerService(){
         if(tripLine!=null){
             return findDistances(listOf(tripLine)).maxOrNull()
         }
-        return if(distances.size>=2) distances.maxOrNull() else null
+        return if(allowMaxFallback && distances.size>=2) distances.maxOrNull() else null
     }
 
     private fun maneuverName(m:Int)=when(m){

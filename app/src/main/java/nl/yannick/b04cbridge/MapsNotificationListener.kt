@@ -284,7 +284,8 @@ class MapsNotificationListener: NotificationListenerService(){
     private val ICON_FINGERPRINTS = mapOf(
         "00030373ff7c3000" to Protocol.RIGHT,
         "00c0c0ceff3e0c00" to Protocol.LEFT,
-        "001818183c3c1800" to Protocol.STRAIGHT
+        "001818183c3c1800" to Protocol.STRAIGHT,
+        "00444e5e5e6c7800" to Protocol.UTURN
     )
 
     private fun iconFingerprint(icon:Icon):String?=runCatching{
@@ -351,6 +352,12 @@ class MapsNotificationListener: NotificationListenerService(){
         if(s.isNotEmpty() && !s.equals("Google Maps",true) && !s.equals("Maps",true) && !s.equals("Komoot",true)) lines.add(s)
     }
 
+    // Google Maps zegt "Keer hier om", niet "keer om". Er werd op de aaneengesloten tekst
+    // gezocht, dus dat woordje ertussen liet de herkenning falen en het display kreeg
+    // rechtdoor te zien terwijl de fietser moest omkeren -- zes keer in één rit.
+    private val UTURN_RE = Regex("\\bkeer\\b[\\p{L}\\s]{0,15}\\bom\\b|\\bomkeren\\b|\\bu-?\\s?turn\\b|\\bu-bocht\\b|\\bwenden\\b|\\bumkehren\\b|\\bmake a u-turn\\b")
+    private fun isUturn(t:String) = UTURN_RE.containsMatchIn(t)
+
     private fun mapsTransientReason(lines:List<String>):String?{
         val text=lines.joinToString(" ").lowercase()
         return when {
@@ -378,7 +385,7 @@ class MapsNotificationListener: NotificationListenerService(){
             val t=line.lowercase().trim(); if(isMetadataLine(t)) continue
             when {
                 isRoundabout(t) -> return roundaboutManeuver(t)
-                "u-turn" in t || "u turn" in t || "keer om" in t || "omkeren" in t || "wenden" in t -> return Protocol.UTURN
+                isUturn(t) -> return Protocol.UTURN
                 "flauw links" in t || "lichte bocht links" in t || "slight left" in t || "houd links" in t || "keep left" in t || "leicht links" in t -> return Protocol.SLIGHT_LEFT
                 "flauw rechts" in t || "lichte bocht rechts" in t || "slight right" in t || "houd rechts" in t || "keep right" in t || "leicht rechts" in t -> return Protocol.SLIGHT_RIGHT
                 "scherp links" in t || "sharp left" in t || "scharf links" in t -> return Protocol.SHARP_LEFT
@@ -386,7 +393,7 @@ class MapsNotificationListener: NotificationListenerService(){
                 "linksaf" in t || "sla links" in t || "ga links" in t || "neem links" in t || "bocht naar links" in t || "turn left" in t || " left onto " in t || "links abbiegen" in t -> return Protocol.LEFT
                 "rechtsaf" in t || "sla rechts" in t || "ga rechts" in t || "neem rechts" in t || "bocht naar rechts" in t || "turn right" in t || " right onto " in t || "rechts abbiegen" in t -> return Protocol.RIGHT
                 "bestemming bereikt" in t || "je bent aangekomen" in t || "aangekomen bij" in t || "destination reached" in t || "you have arrived" in t || "arrived at" in t || "ziel erreicht" in t || "ziel angekommen" in t -> return Protocol.ARRIVE
-                "rechtdoor" in t || "ga verder" in t || "continue" in t || "straight" in t || "volg" in t || "fiets naar" in t || "rij naar" in t || "head " in t || "geradeaus" in t || "weiter auf" in t -> return Protocol.STRAIGHT
+                "rechtdoor" in t || "ga verder" in t || "continue" in t || "straight" in t || "volg" in t || "fiets naar" in t || "fiets richting" in t || "rij naar" in t || "rij richting" in t || "head " in t || "geradeaus" in t || "weiter auf" in t -> return Protocol.STRAIGHT
             }
         }
         return null

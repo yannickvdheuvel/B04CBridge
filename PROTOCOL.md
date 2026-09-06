@@ -22,6 +22,26 @@ push → GitHub Actions → APK → telefoon.
 Het display accepteert **één** verbinding tegelijk. Zolang de laptop-rig eraan hangt,
 komt de telefoon er niet bij, en andersom.
 
+### Verbindingsgedrag
+
+Uit een Android-bugreport van de originele BIKEGO-app, opgenomen op 2026-09-05:
+
+- BIKEGO gebruikt gewoon `BluetoothGatt` met `isDirect=true`, en vraagt MTU 512 aan; het
+  display antwoordt met 515. Onze app ziet exact hetzelfde.
+- Als de link wegvalt (`Reason = 8`) zet **Android zelf** de ACL-link kort daarna weer op,
+  terwijl de GATT-client van de app op dat moment allang gesloten is. "Apparaat verbonden"
+  op systeemniveau zegt dus niets over of de app een bruikbare sessie heeft; houd altijd je
+  eigen GATT- en authenticatiestatus bij.
+- Omdat het display dan niet meer adverteert, levert scannen niets op. BIKEGO herstelt de
+  verbinding door herhaaldelijk een nieuwe GATT-client te maken en direct te verbinden met
+  het bekende adres — twee keer een `Direct connection timeout`, de derde keer raak. Onze
+  `BleManager` doet dat nu ook, en onthoudt het adres over herstarts heen.
+
+Terzijde, maar het verklaart wel waarom dit project bestaat: in datzelfde bugreport staan
+twee native crashes van `com.huiye.ebike` in `libmapbox-common.so` (SIGABRT,
+`jni::PendingJavaException`, thread `MB Search`). De navigatie van de originele app is dus
+aantoonbaar zelf stuk.
+
 ## Frames
 
 ```

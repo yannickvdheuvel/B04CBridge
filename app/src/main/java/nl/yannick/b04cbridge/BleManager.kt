@@ -36,7 +36,21 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
     private var reconnectAttempt = 0
     private var lastTelemetryLogAt = 0L
     private var lastStatsLogAt = 0L
+    private val prefs = context.getSharedPreferences("b04c", Context.MODE_PRIVATE)
     var ready = false; private set
+
+    // Het adres van het display onthouden we over herstarts heen. Uit het bugreport van de
+    // originele BIKEGO-app bleek dat Android de ACL-link zelf alweer opzet terwijl de GATT-client
+    // van de app allang weg is. Het display adverteert dan niet meer, dus een scan vindt hem
+    // nooit -- BIKEGO doet daarom telkens een directe connect naar het bekende adres tot het lukt.
+    private fun savedDevice(): BluetoothDevice? {
+        val mac = prefs.getString("mac", null) ?: return null
+        return runCatching { adapter.getRemoteDevice(mac) }.getOrNull()
+    }
+    private fun rememberDevice(device: BluetoothDevice) {
+        if (prefs.getString("mac", null) != device.address) prefs.edit().putString("mac", device.address).apply()
+    }
+    private fun knownDevice(): BluetoothDevice? = lastDevice ?: savedDevice()
 
     init { log("B04C Bridge BLE code r22-auto-reconnect+telemetry") }
 
@@ -58,7 +72,11 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
     fun scanAndConnect() {
         if (!hasPerm() || !hasScanPerm()) { log("Bluetooth-toestemming ontbreekt"); return }
         connectionWanted=true; reconnectAttempt=0; reconnectScheduled=false
-        startScan(manual=true)
+        val known=knownDevice()
+        if(known!=null){
+            log("Bekend display ${known.address}; direct verbinden...")
+            connectDevice(known,false)
+        } else startScan(manual=true)
     }
 
     @SuppressLint("MissingPermission")
@@ -130,8 +148,12 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
         handler.postDelayed({
             reconnectScheduled=false
             if(!connectionWanted || ready || connecting) return@postDelayed
-            val device=lastDevice
-            if(device!=null && attempt<=2) connectDevice(device,true) else startScan(false)
+            // Directe connect is de hoofdweg, precies zoals de originele app het doet: zolang
+            // Android de ACL-link vasthoudt adverteert het display niet en levert scannen niets
+            // op. Elke vierde poging tóch scannen, voor het geval het display een ander adres
+            // heeft gekregen of we het nog nooit gezien hebben.
+            val device=knownDevice()
+            if(device!=null && attempt%4!=0) connectDevice(device,true) else startScan(false)
         },delay)
     }
 
@@ -140,6 +162,7 @@ class BleManager(private val context: Context, private val log: (String)->Unit) 
             if(newState==BluetoothProfile.STATE_CONNECTED){
                 if(gatt!==g){ runCatching { g.close() }; return }
                 connecting=false; reconnectScheduled=false; reconnectAttempt=0
+                lastDevice=g.device; rememberDevice(g.device)
                 log("GATT verbonden; MTU aanvragen..."); g.requestMtu(64)
             } else if(newState==BluetoothProfile.STATE_DISCONNECTED) {
                 val current=(gatt===g)
